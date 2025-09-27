@@ -6,13 +6,15 @@ import os
 from .config import Config
 
 class RatioCalculator:
-    def __init__(self):
+    def __init__(self, dataset_folder):
         os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # Enable CUDA launch blocking
         os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-        self.config = Config
+        self.config = Config(dataset_folder=dataset_folder)
         # self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')#
         self.channels = self.config.get_round_spot_channels()
+
+        self.channels = ['488', '514', '561', '594', '638'] # MJD HACK
         
     # def objective_fn(self, r: torch.Tensor, subset: torch.Tensor, L1: float) -> torch.Tensor:
     #     """Calculate objective function for ratio optimization"""
@@ -315,15 +317,15 @@ class RatioCalculator:
                 return (100 * ratios / ratios.max()).astype(int)
 
             def objective_fn(r, subset, L1): 
-                n_cam = len(self.config.get_round_spot_channels())
+                n_cam = len(self.channels) # MJD
                 r = r / torch.norm(r, dim=0)
                 dot_products = torch.tile(subset @ r, (n_cam, 1, 1))
                 ys = torch.tile(torch.unsqueeze(r,1), (1, subset.shape[0], 1))
                 xs = torch.tile(torch.unsqueeze(torch.transpose(subset, 0, 1),2), (1, 1, n_cam))
                 return torch.sum(torch.min(torch.norm(dot_products * ys - xs, dim=0), dim=1)[0]) + L1 * torch.sum(torch.abs(r))
 
-            n_cam = len(self.config.get_round_spot_channels())
-            channels = self.config.get_round_spot_channels()
+            n_cam = len(self.channels) # MJD
+            channels = self.channels # MJD
             initial = np.eye((n_cam))
             
             # Select spots for each channel
