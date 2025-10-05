@@ -7,8 +7,8 @@ from typing import List, Dict, Tuple
 from .config import Config
 
 class SpotUnmixer:
-    def __init__(self):
-        self.config = Config
+    def __init__(self, dataset_folder: str):
+        self.config = Config(dataset_folder=dataset_folder)
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     def calculate_distances(

@@ -128,9 +128,7 @@ class Config():
             return
         spot_channels = self.manifest['spot_channels']
         round = self.manifest['round']
-        manifest_gene_dict = self.manifest['gene_dict']
-
-        #gene_dict is a dict of dicts with keys: round { channel: gene_name}
+        manifest_gene_dict = self.manifest['gene_dict']        #gene_dict is a dict of dicts with keys: round { channel: gene_name}
         temp_dict = {}
         
         for channel, gene in manifest_gene_dict.items():
@@ -219,27 +217,27 @@ class Config():
         if spots_channels != expected_channels:
             missing = expected_channels - spots_channels
             extra = spots_channels - expected_channels
-            print(f"Warning: Mismatch in spots folders. Missing: {missing}, Extra: {extra}")
+            #print(f"Warning: Mismatch in spots folders. Missing: {missing}, Extra: {extra}")
 
         # Validate multichannel folders
         multichan_channels = set(folder_paths['multichan_folders'].keys())
         if multichan_channels != expected_channels:
             missing = expected_channels - multichan_channels
             extra = multichan_channels - expected_channels
-            print(f"Warning: Mismatch in multichannel folders. Missing: {missing}, Extra: {extra}")
+            #print(f"Warning: Mismatch in multichannel folders. Missing: {missing}, Extra: {extra}")
 
         for source_channel, targets in folder_paths['multichan_folders'].items():
             expected_targets = expected_channels - {source_channel}
             if set(targets.keys()) != expected_targets:
                 missing = expected_targets - set(targets.keys())
                 extra = set(targets.keys()) - expected_targets
-                print(f"Warning: Mismatch in multichannel targets for channel {source_channel}. Missing: {missing}, Extra: {extra}")
+                #print(f"Warning: Mismatch in multichannel targets for channel {source_channel}. Missing: {missing}, Extra: {extra}")
 
     def get_and_validate_folder_paths(self) -> Dict[str, Dict[str, str]]:
         """Gets folder paths and validates them"""
         if self.folder_paths == None: 
             folder_paths = self.get_folder_paths_pipeline()
-            print(f'folder_paths {folder_paths}')
+            #print(f'folder_paths {folder_paths}')
 
             self.validate_folder_paths(folder_paths)
             self.folder_paths = folder_paths

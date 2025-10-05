@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Tuple
 import os
 from .config import Config
+import typing
 
 class RatioCalculator:
     def __init__(self, dataset_folder):
@@ -310,7 +311,10 @@ class RatioCalculator:
         ratios = np.loadtxt(ratio_location).T
         return ratios
     
-    def calculate_ratios_by_channel(self, intensity_data: np.ndarray, ratio_location: Path, detection_channels: np.ndarray) -> np.ndarray:
+    def calculate_ratios_by_channel(self, intensity_data: np.ndarray, 
+                                    ratio_location: Path, 
+                                    detection_channels: np.ndarray,
+                                    spot_filter_method="95percentile") -> np.ndarray:
         """Calculate ratios using only spots detected in their primary channels"""
         if not os.path.exists(ratio_location):
             def norm(ratios): 
@@ -330,33 +334,39 @@ class RatioCalculator:
             
             # Select spots for each channel
             selected_spots = []
+            
             for ch_idx, channel in enumerate(channels):
                 # Get spots detected in this channel
                 try: 
                     channel_mask = detection_channels == channel
                     channel_spots = intensity_data[channel_mask]
-                    
-                    if len(channel_spots) > 0:
-                        # Filter based on intensity in detection channel
-                        intensity_threshold = np.percentile(channel_spots[:, ch_idx], self.config.PERCENTILE)  # More stringent threshold
-                        print(f" Intensity threshold: {intensity_threshold} for channel: {channel}")
-                        high_intensity_mask = channel_spots[:, ch_idx] > intensity_threshold
-                        high_intensity_spots = channel_spots[high_intensity_mask]
-                        print(f" Number of high intensity spots: {len(high_intensity_spots)} in channel: {channel}")
-                        
-                        # Sample spots if we have too many
-                        target_spots = min(len(high_intensity_spots), self.config.N_SUBSET // n_cam)
-                        if target_spots==0: 
-                            print(f'no spots found in channel {channel}')
-                            continue
-                        if len(high_intensity_spots) > target_spots:
-                            selected_indices = np.random.choice(len(high_intensity_spots), target_spots, replace=False)
-                            selected_spots.append(high_intensity_spots[selected_indices])
-                        else:
-                            selected_spots.append(high_intensity_spots)
+
+                    if spot_filter_method == "95percentile":
+                        if len(channel_spots) > 0:
+                            # Filter based on intensity in detection channel
+                            intensity_threshold = np.percentile(channel_spots[:, ch_idx], self.config.PERCENTILE)  # More stringent threshold
+                            print(f" Intensity threshold: {intensity_threshold} for channel: {channel}")
+                            high_intensity_mask = channel_spots[:, ch_idx] > intensity_threshold
+                            high_intensity_spots = channel_spots[high_intensity_mask]
+                            print(f" Number of high intensity spots: {len(high_intensity_spots)} in channel: {channel}")
+                            
+                            # Sample spots if we have too many
+                            target_spots = min(len(high_intensity_spots), self.config.N_SUBSET // n_cam)
+                            if target_spots==0: 
+                                print(f'no spots found in channel {channel}')
+                                continue
+                            if len(high_intensity_spots) > target_spots:
+                                selected_indices = np.random.choice(len(high_intensity_spots), target_spots, replace=False)
+                                selected_spots.append(high_intensity_spots[selected_indices])
+                            else:
+                                selected_spots.append(high_intensity_spots)
+                    else:
+                        selected_spots.append(channel_spots)
                 except Exception as e: 
                     print(f'Error {e} in sampling spots in channel {channel} for calculating dye line')
             selected_data = np.vstack(selected_spots)
+
+            
             # Combine selected spots
             if len(selected_data)<1000:
                 print("Warning: Less than 1000 spots met the selection criteria.")
@@ -409,4 +419,147 @@ class RatioCalculator:
             for x in optimized.T: print(norm(x))
             
         ratios = np.loadtxt(ratio_location).T
+        return ratios
+
+
+    def calculate_ratios_by_channel_loss(self, intensity_data: np.ndarray, 
+                                    ratio_location: Path, 
+                                    detection_channels: np.ndarray,
+                                    spot_filter_method="95percentile",
+                                    return_loss_history: bool = False) -> typing.Union[np.ndarray, typing.Tuple[np.ndarray, dict]]:
+        """Calculate ratios using only spots detected in their primary channels.
+
+        If return_loss_history=True, also returns a dict with:
+        - 'loss_per_epoch': np.ndarray of shape (EPOCHS,)
+        - 'best_epoch': int
+        - 'best_loss': float
+        - optionally 'skipped_reason' if no training was performed
+        """
+        loss_report = None  # <-- NEW
+
+        if not os.path.exists(ratio_location):
+            def norm(ratios): 
+                return (100 * ratios / ratios.max()).astype(int)
+
+            def objective_fn(r, subset, L1): 
+                n_cam = len(self.channels) # MJD
+                r = r / torch.norm(r, dim=0)
+                dot_products = torch.tile(subset @ r, (n_cam, 1, 1))
+                ys = torch.tile(torch.unsqueeze(r,1), (1, subset.shape[0], 1))
+                xs = torch.tile(torch.unsqueeze(torch.transpose(subset, 0, 1),2), (1, 1, n_cam))
+                return torch.sum(torch.min(torch.norm(dot_products * ys - xs, dim=0), dim=1)[0]) + L1 * torch.sum(torch.abs(r))
+
+            n_cam = len(self.channels) # MJD
+            channels = self.channels # MJD
+            initial = np.eye((n_cam))
+            
+            # Select spots for each channel
+            selected_spots = []
+            
+            for ch_idx, channel in enumerate(channels):
+                try: 
+                    channel_mask = detection_channels == channel
+                    channel_spots = intensity_data[channel_mask]
+
+                    if spot_filter_method == "95percentile":
+                        if len(channel_spots) > 0:
+                            intensity_threshold = np.percentile(channel_spots[:, ch_idx], self.config.PERCENTILE)
+                            print(f" Intensity threshold: {intensity_threshold} for channel: {channel}")
+                            high_intensity_mask = channel_spots[:, ch_idx] > intensity_threshold
+                            high_intensity_spots = channel_spots[high_intensity_mask]
+                            print(f" Number of high intensity spots: {len(high_intensity_spots)} in channel: {channel}")
+                            
+                            target_spots = min(len(high_intensity_spots), self.config.N_SUBSET // n_cam)
+                            if target_spots==0: 
+                                print(f'no spots found in channel {channel}')
+                                continue
+                            if len(high_intensity_spots) > target_spots:
+                                selected_indices = np.random.choice(len(high_intensity_spots), target_spots, replace=False)
+                                selected_spots.append(high_intensity_spots[selected_indices])
+                            else:
+                                selected_spots.append(high_intensity_spots)
+                    else:
+                        selected_spots.append(channel_spots)
+                except Exception as e: 
+                    print(f'Error {e} in sampling spots in channel {channel} for calculating dye line')
+            selected_data = np.vstack(selected_spots)
+
+            # Combine selected spots
+            if len(selected_data)<1000:
+                print("Warning: Less than 1000 spots met the selection criteria.")
+                print(f"This is generally due to there being very few spots detected.")
+                print("Saving default identity matrix as ratio between channel intensity.")
+                optimized = initial
+
+                # <-- NEW: report why no training happened
+                if return_loss_history:
+                    loss_report = {
+                        "loss_per_epoch": np.array([], dtype=float),
+                        "best_epoch": None,
+                        "best_loss": None,
+                        "skipped_reason": "insufficient_spots"
+                    }
+            else: 
+                # Setup CUDA and tensors
+                os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+                os.environ['TORCH_USE_CUDA_DSA'] = '1'
+                torch.backends.cuda.matmul.allow_tf32 = False
+                
+                r_gpu = torch.from_numpy(initial).cuda(0).requires_grad_()
+                data_gpu = torch.from_numpy(selected_data).cuda(0).double()
+                
+                # Optimization
+                n_sub = np.int32(len(selected_data) * self.config.FRAC_SAMPLED)
+                loss_hist = torch.zeros(self.config.EPOCHS)         # per-epoch full-data loss
+                r_hist = torch.zeros((self.config.EPOCHS, n_cam, n_cam))
+
+                for i in range(self.config.EPOCHS):
+                    if not i % self.config.RESAMPLE_ITER:
+                        sub_gpu = data_gpu[np.random.choice(len(selected_data), n_sub, replace=False)]
+                        
+                    if (not i % 1000 and i) or i == 1:
+                        print(i, loss_hist[i-1], flush=True)
+                        
+                    loss = objective_fn(r_gpu.double(), sub_gpu, self.config.L1)
+                    loss.backward()
+                    
+                    # Evaluate full-data loss for history (store as scalar)
+                    full_loss = objective_fn(r_gpu.clone().double(), data_gpu, self.config.L1).detach()
+                    loss_hist[i] = full_loss.item()
+
+                    # Keep snapshot of parameters this epoch
+                    r_hist[i] = r_gpu.clone().double().detach().cpu()   # <-- ensure CPU copy
+                    
+                    # SGD step with normalization
+                    r_gpu.data -= self.config.LEARNING_RATE * r_gpu.grad.data
+                    r_gpu.data = torch.div(r_gpu.data, torch.norm(r_gpu.data))
+                    r_gpu.grad = None
+
+                best_idx = int(torch.argmin(loss_hist).item())
+                optimized = r_hist[best_idx].numpy()
+                optimized = optimized/np.linalg.norm(optimized, axis=0)
+                print('error', (loss_hist.min().item())/len(selected_data))
+
+                # <-- NEW: package loss history for return
+                if return_loss_history:
+                    loss_np = loss_hist.detach().cpu().numpy()
+                    loss_report = {
+                        "loss_per_epoch": loss_np,
+                        "best_epoch": int(np.argmin(loss_np)),
+                        "best_loss": float(loss_np.min())
+                    }
+
+            np.savetxt(ratio_location, 100 * optimized.T / optimized.max(0)[..., None], 
+                    delimiter='\t', fmt='%d')
+            
+            print('original')
+            for x in initial.T: print(norm(x))
+            print('optimized')
+            for x in optimized.T: print(norm(x))
+            
+        ratios = np.loadtxt(ratio_location).T
+
+        # <-- NEW: return both if requested
+        if return_loss_history:
+            return ratios, loss_report
         return ratios
