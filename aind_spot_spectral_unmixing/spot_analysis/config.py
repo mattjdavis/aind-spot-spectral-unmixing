@@ -169,6 +169,13 @@ class Config():
             with open(manifest_path[0], 'r') as f:
                 self.manifest = json.load(f)
                 print(f"Loaded manifest with channels: {self.manifest.get('spot_channels', [])}")
+
+                # Update round to 5 for specific datasets
+                dataset_folder_str = str(self.dataset_folder.name) if isinstance(self.dataset_folder, pathlib.Path) else str(self.dataset_folder)
+                if dataset_folder_str in ("HCR_754803_2025-09-18_13-00-00_processed_2025-09-20_22-57-09",
+                                        "HCR_767018_2025-09-18_13-00-00_processed_2025-09-20_22-57-09"):
+                    print(f"Updating round from {self.manifest.get('round')} to 5 for dataset {dataset_folder_str}")
+                    self.manifest["round"] = 5
         except FileNotFoundError:
             self.manifest = None
             raise FileNotFoundError(f"Processing manifest not found at {manifest_path}")

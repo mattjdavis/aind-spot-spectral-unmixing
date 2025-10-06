@@ -21,8 +21,9 @@ from .config import Config
 #     volume_quantiles: List[float] = (0.08, 0.5, 0.95)
     
 class cell_by_gene_processor:
-    def __init__(self, dataset_folder):
-        self.config = Config(dataset_folder)
+    def __init__(self, dataset_folder, config):
+        #self.config = Config(dataset_folder)
+        self.config = config
         self.spots_df = pd.DataFrame()
         self.segmentation_df = pd.DataFrame()
         
