@@ -14,9 +14,8 @@ class RatioCalculator:
         self.config = config
         # self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')#
         self.channels = self.config.get_round_spot_channels()
+        print(f"Using channels: {self.channels}")
 
-        self.channels = ['488', '514', '561', '594', '638'] # MJD HACK
-        
     # def objective_fn(self, r: torch.Tensor, subset: torch.Tensor, L1: float) -> torch.Tensor:
     #     """Calculate objective function for ratio optimization"""
     #     r = r / torch.norm(r, dim=0)
