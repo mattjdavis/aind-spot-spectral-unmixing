@@ -79,8 +79,17 @@ class SpotUnmixer:
         min_dist: float
     ) -> np.ndarray:
         """Filter spots based on spatial proximity"""
-        # Initial filtering
-        keep = np.array(intensities.iloc[:, channel_idx] > 0)
+        # Use column NAME instead of positional index to avoid column-order bugs
+        channels = self.config.get_round_spot_channels()
+        channel_name = str(channels[channel_idx])
+        intensity_col = f'chan_{channel_name}_intensity'
+        if intensity_col in intensities.columns:
+            keep = np.array(intensities[intensity_col] > 0)
+        else:
+            # Fallback to positional (original behavior) with warning
+            print(f"WARNING: '{intensity_col}' not found in intensities columns {list(intensities.columns)}. "
+                  f"Falling back to positional index {channel_idx}.")
+            keep = np.array(intensities.iloc[:, channel_idx] > 0)
         
         # Build KD-tree for spatial matching
         spatial_matches = cKDTree(
@@ -112,9 +121,9 @@ class SpotUnmixer:
             # Remove point with worse ratio match
             if stats.iloc[a]['dist_r'] > stats.iloc[b]['dist_r']:
                 keep[b] = 0
-                print("remove 1", spots.iloc[b]['cell_id']) # debug
+                #print("remove 1", spots.iloc[b]['cell_id']) # debug
             else:
-                print("remove 2", spots.iloc[a]['cell_id'])
+                #print("remove 2", spots.iloc[a]['cell_id'])
                 keep[a] = 0
                 
         return keep
@@ -267,6 +276,10 @@ class SpotUnmixer:
             
         # Combine results
         unmixed_df = pd.concat(unmixed_spots, ignore_index=True)
+        
+        # Normalize chan/unmixed_chan to str to prevent category vs object mismatches downstream
+        unmixed_df['chan'] = unmixed_df['chan'].astype(str)
+        unmixed_df['unmixed_chan'] = unmixed_df['unmixed_chan'].astype(str)
         
         self._save_results(unmixed_df, min_dist)
             

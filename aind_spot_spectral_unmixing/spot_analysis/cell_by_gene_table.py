@@ -46,9 +46,21 @@ class cell_by_gene_processor:
             
             with open(file_location, 'rb') as file:
                 ch_spots_df = pickle.load(file)
+            
+            # Normalize chan to str to prevent dtype mismatches with GENE_DICT keys
+            ch_spots_df['chan'] = ch_spots_df['chan'].astype(str)
+            if 'unmixed_chan' in ch_spots_df.columns:
+                ch_spots_df['unmixed_chan'] = ch_spots_df['unmixed_chan'].astype(str)
                 
             for ch in round_chans:
                 ch_spots_df.loc[ch_spots_df['chan']==ch, 'gene'] = self.config.GENE_DICT[str(rn)][ch]
+            
+            # Sanity check: warn if any spots got no gene assignment
+            n_no_gene = ch_spots_df['gene'].isna().sum() if 'gene' in ch_spots_df.columns else len(ch_spots_df)
+            if n_no_gene > 0:
+                print(f"WARNING: {n_no_gene}/{len(ch_spots_df)} spots have no gene assignment. "
+                      f"chan values: {sorted(ch_spots_df['chan'].unique())}, "
+                      f"GENE_DICT keys: {round_chans}")
             
             if unmixed:
                 ch_spots_df = ch_spots_df.loc[ch_spots_df['chan']==ch_spots_df['unmixed_chan']]
