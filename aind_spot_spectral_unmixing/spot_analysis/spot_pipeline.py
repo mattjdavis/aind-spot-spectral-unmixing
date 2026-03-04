@@ -29,11 +29,11 @@ import aind_hcr_qc.viz.spectral_unmixing as su
 from aind_hcr_qc.utils.utils import saveable_plot
 
 # --- spot_analysis imports (sibling modules) ---
-from spot_analysis import clean_spots
-from spot_analysis import config, ratio_calculator
-from spot_analysis.cell_by_gene_table import cell_by_gene_processor
-from spot_analysis.spot_processor import SpotProcessor
-from spot_analysis.unmixer import SpotUnmixer
+from aind_spot_spectral_unmixing.spot_analysis import clean_spots
+from aind_spot_spectral_unmixing.spot_analysis import config, ratio_calculator
+from aind_spot_spectral_unmixing.spot_analysis.cell_by_gene_table import cell_by_gene_processor
+from aind_spot_spectral_unmixing.spot_analysis.spot_processor import SpotProcessor
+from aind_spot_spectral_unmixing.spot_analysis.unmixer import SpotUnmixer
 
 
 # ============================================================================
