@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "aind-spot-spectral-unmixing"
+version = "0.1.0"
+description = "Spot spectral unmixing for AIND HCR data"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "seaborn",
+    "scikit-learn",
+    "aind-hcr-data-loader",
+    "aind-hcr-qc",
+]
+
+[tool.setuptools.packages.find]
+include = ["aind_spot_spectral_unmixing*"]
