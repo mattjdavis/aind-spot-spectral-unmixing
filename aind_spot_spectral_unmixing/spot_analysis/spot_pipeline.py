@@ -988,15 +988,20 @@ def run_spot_pipeline_v2(
     print(f"Ratios matrix saved to {ratios_csv_path}")
 
     # save config
+    def _json_default(obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
     config_path = output_folder / f"unmixing_config.json"
     with open(config_path, "w") as f:
-        json.dump(pipeline_config.__dict__, f, indent=4)
+        json.dump(pipeline_config.__dict__, f, indent=4, default=_json_default)
     print(f"Pipeline config saved to {config_path}")
 
     # ds_config
     ds_config_path = output_folder / f"ds_config.json"
     with open(ds_config_path, "w") as f:
-        json.dump(ds_config.__dict__, f, indent=4)
+        json.dump(ds_config.__dict__, f, indent=4, default=_json_default)
     print(f"Dataset config saved to {ds_config_path}")
     
     print("\n" + "=" * 80)
