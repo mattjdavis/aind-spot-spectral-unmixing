@@ -397,6 +397,7 @@ def calculate_ratios(
     # Create spot_capsule config
     ds_config = config.Config(dataset_folder=pipeline_data.ds.rounds[pipeline_data.round_key].name)
     ds_config.SCRATCH_FOLDER = output_folder
+    ds_config.OUTPUT_FOLDER = output_folder
     ds_config.ROUND_N = str(pipeline_data.round_key[1:])
     ds_config.CENT_CUTOFF = pipeline_config.cent_cutoff
     ds_config.CORR_CUTOFF = pipeline_config.corr_cutoff

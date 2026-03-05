@@ -462,7 +462,9 @@ class SpotUnmixer:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         unmixed_df.to_pickle(output_path)
-        unmixed_df.to_pickle(scratch_path)
+        if scratch_path != output_path:
+            scratch_path.parent.mkdir(parents=True, exist_ok=True)
+            unmixed_df.to_pickle(scratch_path)
         
     def process_multiple_distances(
         self,
