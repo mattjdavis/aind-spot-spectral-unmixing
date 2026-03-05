@@ -886,7 +886,8 @@ def run_spot_pipeline_v2(
     round_key: str,
     pipeline_config: SpotPipelineConfig,
     skip_visualizations: bool = False,
-    color_map: Optional[Dict] = None
+    color_map: Optional[Dict] = None,
+    return_results = False,
 ) -> Dict[str, Any]:
     """
     Modular spot pipeline with configurable parameters.
@@ -985,31 +986,44 @@ def run_spot_pipeline_v2(
     ratios_df = pd.DataFrame(ratios)
     ratios_df.to_csv(ratios_csv_path, index=False)
     print(f"Ratios matrix saved to {ratios_csv_path}")
+
+    # save config
+    config_path = output_folder / f"unmixing_config.json"
+    with open(config_path, "w") as f:
+        json.dump(pipeline_config.__dict__, f, indent=4)
+    print(f"Pipeline config saved to {config_path}")
+
+    # ds_config
+    ds_config_path = output_folder / f"ds_config.json"
+    with open(ds_config_path, "w") as f:
+        json.dump(ds_config.__dict__, f, indent=4)
+    print(f"Dataset config saved to {ds_config_path}")
     
     print("\n" + "=" * 80)
     print("PIPELINE COMPLETE!")
     print("=" * 80)
     
     # Return all results
-    return {
-        'pipeline_data': pipeline_data,
-        'spots_df_full': spots_df_processed,
-        'spots_df_cleaned': spots_df_cleaned,
-        'clean_mask': clean_mask,
-        'ratios': ratios,
-        'ratios_matrix': ratios_df,
-        'reassignment_matrix': reassignment_matrix,
-        'spot_fate_matrix': spot_fate_matrix,
-        'loss_history': loss_history,
-        'ratio_path': ratio_path,
-        'mixed_results': mixed_results,
-        'unmixed_results': unmixed_results,
-        'stats_df': stats_df,
-        'unmix_results': unmix_results,
-        'output_folder': output_folder,
-        'ds_config': ds_config,
-        'config': pipeline_config
-    }
+    if return_results:
+        return {
+            'pipeline_data': pipeline_data,
+            'spots_df_full': spots_df_processed,
+            'spots_df_cleaned': spots_df_cleaned,
+            'clean_mask': clean_mask,
+            'ratios': ratios,
+            'ratios_matrix': ratios_df,
+            'reassignment_matrix': reassignment_matrix,
+            'spot_fate_matrix': spot_fate_matrix,
+            'loss_history': loss_history,
+            'ratio_path': ratio_path,
+            'mixed_results': mixed_results,
+            'unmixed_results': unmixed_results,
+            'stats_df': stats_df,
+            'unmix_results': unmix_results,
+            'output_folder': output_folder,
+            'ds_config': ds_config,
+            'config': pipeline_config
+        }
 
 
 # ============================================================================
