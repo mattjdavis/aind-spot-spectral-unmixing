@@ -154,14 +154,20 @@ class Config():
     
     def _load_manifest(self):
         """Load the processing manifest JSON file"""
-        #pipeline path
+        # First try: <DATA_FOLDER>/derived/processing_manifest.json  (pipeline path)
         manifest_path = list(pathlib.Path(self.DATA_FOLDER).glob("derived/processing_manifest.json"))
 
         if not len(manifest_path):
-            print('Didn\'t find pipeline processing manifest')
+            print('Didn\'t find manifest in derived/, trying */derived/...')
             manifest_path = list(pathlib.Path(self.DATA_FOLDER).glob("*/derived/processing_manifest.json"))
-            if not len(manifest_path):
-                raise FileNotFoundError("No capsule processing_manifest.json was found!")
+
+        if not len(manifest_path):
+            # Second try: <DATA_FOLDER>/processing_manifest.json  (root-level, matches hcr_dataset behaviour)
+            print('Didn\'t find manifest in */derived/, trying root-level...')
+            manifest_path = list(pathlib.Path(self.DATA_FOLDER).glob("processing_manifest.json"))
+
+        if not len(manifest_path):
+            raise FileNotFoundError("No capsule processing_manifest.json was found!")
 
         print(f'Manifest_path {manifest_path}')
 
