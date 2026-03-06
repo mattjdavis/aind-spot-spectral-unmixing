@@ -269,8 +269,8 @@ def load_pipeline_data(
     if use_soma_overlap_filter:
         filter_results = hcr_filters.roi_filter_comprehensive(ds)
         combined_ids = set(filter_results['filtered_ids'])
-        roi_classifier_df = filter_results['soma_classifier_df']
-        roi_upscale_df = filter_results['metrics_df']
+        #roi_classifier_df = filter_results['soma_classifier_df']
+        #roi_upscale_df = filter_results['metrics_df']
         # FIX: Use cell_info['cell_id'] (the actual cell IDs), NOT cell_info.index (row numbers)
         filtered_cell_ids = [c for c in all_cell_ids if c not in combined_ids]
         filter_type = "soma and overlap"
