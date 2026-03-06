@@ -121,6 +121,11 @@ class Config():
         """ Processing Manifest Json Example
     {'segmentation_channels': {'background': '405', 'nuclear': None}, 'spot_channels': ['561', '488', '638'], 'round': 1, 'stitching_channels': ['561', '488', '638'], 'gene_dict': {'405': {'gene': 'Rn28s', 'barcode': '', 'fluorophore': '', 'wavelength': 'dtype:', 'round': 1}, '561': {'gene': 'Calb2', 'barcode': 'B7', 'fluorophore': '', 'wavelength': '561,', 'round': 1}, '488': {'gene': 'Npy', 'barcode': 'B1', 'fluorophore': '', 'wavelength': '488,', 'round': 1}, '638': {'gene': 'Tac1', 'barcode': 'B3', 'fluorophore': '', 'wavelength': '638,', 'round': 1}}}"""
 
+    @staticmethod
+    def _str_channel(ch) -> str:
+        """Coerce a channel value to str, stripping any accidental whitespace."""
+        return str(ch).strip()
+
     def _make_gene_dict_from_manifest(self):
         """Make a gene_dict from the processing manifest"""
         if not self.manifest:
@@ -132,7 +137,7 @@ class Config():
         temp_dict = {}
         
         for channel, gene in manifest_gene_dict.items():
-            temp_dict[str(channel)] = str(gene['gene'])
+            temp_dict[self._str_channel(channel)] = str(gene['gene'])
         
         gene_dict= {}
         gene_dict[str(round)] = temp_dict
@@ -145,7 +150,7 @@ class Config():
 
     def get_round_spot_channels(self) -> Dict[str, str]:
         spot_channels = self.manifest['spot_channels']
-        return spot_channels
+        return [self._str_channel(ch) for ch in spot_channels]
 
     def get_folder_paths(self) -> Dict[str, Dict[str, str]]:
         return self.get_and_validate_folder_paths()
@@ -206,8 +211,8 @@ class Config():
                 # Check for spot intensity files
                 spot_match = re.match(spot_regex, relative_path)
                 if spot_match:
-                    source_channel = spot_match.group(2)
-                    target_channel = spot_match.group(3)
+                    source_channel = self._str_channel(spot_match.group(2))
+                    target_channel = self._str_channel(spot_match.group(3))
 
                     if source_channel == target_channel: 
                         spots_folders[source_channel] = relative_path
