@@ -797,7 +797,8 @@ def generate_all_visualizations(
     
     # 2. Plot dye lines for optimized spots
     print("  - Plotting dye lines (optimized spots)...")
-    intensity_cols = [col for col in spots_df_cleaned.columns if col.endswith('intensity')]
+    intensity_cols = [f'chan_{ch}_intensity' for ch in pipeline_data.channels
+                      if f'chan_{ch}_intensity' in spots_df_cleaned.columns]
     intensity_array_opt = spots_df_cleaned[intensity_cols].to_numpy()
     
     for plot_spots in [True, False]:
@@ -825,7 +826,8 @@ def generate_all_visualizations(
     
     # 3. Plot dye lines for all spots
     print("  - Plotting dye lines (all spots)...")
-    intensity_cols_full = [col for col in spots_df_full.columns if col.endswith('intensity')]
+    intensity_cols_full = [f'chan_{ch}_intensity' for ch in pipeline_data.channels
+                           if f'chan_{ch}_intensity' in spots_df_full.columns]
     intensity_array_full = spots_df_full[intensity_cols_full].to_numpy()
     detected_channels_full = spots_df_full["chan"].values
     
