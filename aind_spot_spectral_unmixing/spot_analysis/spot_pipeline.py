@@ -403,8 +403,20 @@ def calculate_ratios(
     ds_config.CORR_CUTOFF = pipeline_config.corr_cutoff
     ds_config.DIST_CUTOFF = pipeline_config.dist_cutoff
     
-    # Extract intensity array
-    intensity_cols = [col for col in spots_df.columns if col.endswith('intensity')]
+    # Extract intensity array — only for spot channels (not e.g. 405/DAPI / Syto59)
+    spot_channels = ds_config.get_round_spot_channels()
+    all_intensity_cols = [col for col in spots_df.columns if col.endswith('intensity')]
+    intensity_cols = [f'chan_{ch}_intensity' for ch in spot_channels
+                      if f'chan_{ch}_intensity' in spots_df.columns]
+    ignored_cols = set(all_intensity_cols) - set(intensity_cols)
+    if ignored_cols:
+        import warnings
+        warnings.warn(
+            f"Ratio fitting will only use spot channels {spot_channels}. "
+            f"Ignoring extra intensity columns (e.g. Syto59/405): {sorted(ignored_cols)}",
+            UserWarning,
+            stacklevel=2,
+        )
     intensity_array = spots_df[intensity_cols].to_numpy()
     print(f"Intensity array shape: {intensity_array.shape}")
     
