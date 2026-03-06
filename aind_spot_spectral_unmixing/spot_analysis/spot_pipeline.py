@@ -299,7 +299,7 @@ def load_pipeline_data(
     
     # Get channel information
     pm = ds.rounds[round_key].processing_manifest
-    channels = pm["spot_channels"]
+    channels = [str(ch).strip() for ch in pm["spot_channels"]]
     dye_to_label = {0: '488', 1: '514', 2: '561', 3: '594', 4: '638'}
     
     return PipelineData(
