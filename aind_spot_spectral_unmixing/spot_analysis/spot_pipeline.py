@@ -588,7 +588,7 @@ def unmix_and_process_spots(
     chan_dtype_filtered = spots_df_filtered['chan'].dtype
     print(f"  [DIAG] Filtered 'chan' dtype: {chan_dtype_filtered}, "
           f"unique values: {sorted(spots_df_filtered['chan'].unique())}")
-    manifeds
+
     # Recalculate distances for filtered spots
     all_chans_filt_stats = unmixer.calculate_distances(spots_df_filtered, ratios)
     
