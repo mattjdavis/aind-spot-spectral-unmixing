@@ -394,8 +394,19 @@ def calculate_ratios(
     """
     print("Calculating spectral unmixing ratios...")
     
+    # Build the manifest to pass into Config.  Force 'round' to match round_key so
+    # GENE_DICT is always keyed by ROUND_N, and carry through any in-memory gene-name
+    # patches (e.g. from apply_gene_dict_overrides) rather than re-reading from disk.
+    manifest_override = None
+    if pipeline_data.processing_manifest:
+        manifest_override = {**pipeline_data.processing_manifest,
+                              'round': int(pipeline_data.round_key[1:])}
+
     # Create spot_capsule config
-    ds_config = config.Config(dataset_folder=pipeline_data.ds.rounds[pipeline_data.round_key].name)
+    ds_config = config.Config(
+        dataset_folder=pipeline_data.ds.rounds[pipeline_data.round_key].name,
+        manifest=manifest_override
+    )
     ds_config.SCRATCH_FOLDER = output_folder
     ds_config.OUTPUT_FOLDER = output_folder
     ds_config.ROUND_N = str(pipeline_data.round_key[1:])
