@@ -27,7 +27,7 @@ class Config():
             '12':{'1': 'Cck', '2': 'Crispld2', '3': 'Nmbr', '4': 'Anxa2'},
             '13':{'1': 'Snap25', '2': 'lgfbp4', '3': 'Chrm2', '4': 'Ndnf'}}
 
-    def __init__(self, dataset_folder: str):
+    def __init__(self, dataset_folder: str, manifest: Dict[str, Any] = None):
         self.dataset_folder = pathlib.Path(dataset_folder)
 
         self.SPOTS_FOLDER = pathlib.Path(f'/data/{self.dataset_folder}')
@@ -37,7 +37,12 @@ class Config():
         Config.SPOTS_FOLDER = self.SPOTS_FOLDER
         Config.DATA_FOLDER = self.DATA_FOLDER
 
-        self._load_manifest()
+        if manifest is not None:
+            # Use the provided in-memory manifest (e.g. with round/gene-name overrides)
+            # instead of re-reading from disk.
+            self.manifest = manifest
+        else:
+            self._load_manifest()
         self._update_round_from_manifest()
         self._make_gene_dict_from_manifest()
         self.folder_paths = None
