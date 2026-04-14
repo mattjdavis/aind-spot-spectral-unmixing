@@ -75,6 +75,13 @@ class Config():
     min_dist = 3
     volume_quantiles = (0.08, 0.5, 0.95)
 
+    # Crosstalk QC parameters
+    # z_intensity_vs_removed: brightness veto — spots brighter than the removed
+    # population by this many robust z-scores are unconditionally kept (score → 0)
+    CROSSTALK_Z_THRESHOLD: float = 12.0
+    # crosstalk_score threshold — spots with score > this value have valid_spot set False
+    CROSSTALK_SCORE_THRESHOLD: float = 1.0
+
 
     folder_paths = None
 

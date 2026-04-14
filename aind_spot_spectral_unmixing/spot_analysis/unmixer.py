@@ -49,7 +49,17 @@ class SpotUnmixer:
         
         distances = torch.norm(fit - data_gpu, dim=0).cpu().numpy()
         
-        return self._create_stats_dataframe(distances)
+        stats_df = self._create_stats_dataframe(distances)
+
+        # Stamp spot_uid_int as a data column so downstream code can safely
+        # merge stats_df back onto any filtered / re-indexed spots dataframe
+        # without relying on positional index alignment.
+        if 'spot_uid_int' in spots_df.columns:
+            stats_df['spot_uid_int'] = spots_df['spot_uid_int'].values
+        else:
+            stats_df['spot_uid_int'] = spots_df.index.values
+
+        return stats_df
     
     def _create_stats_dataframe(self, distances: np.ndarray) -> pd.DataFrame:
         """Create statistics dataframe from distances"""
@@ -448,6 +458,295 @@ class SpotUnmixer:
             'kept_B': maskB.sum() - removed_B
         }
     
+    def build_removed_spots(
+        self,
+        spots_df_mixed: pd.DataFrame,
+        unmixed_df: pd.DataFrame,
+        min_dist: float,
+    ) -> pd.DataFrame:
+        """
+        Identify spots present in the mixed table that were removed during unmixing.
+
+        Removal happens for two reasons:
+        1. Spatial de-duplication (two spots in the same cell within min_dist).
+        2. Channel re-assignment followed by conflict resolution.
+
+        The returned DataFrame is the **reference population** used to calculate
+        ``z_intensity_vs_removed`` in ``compute_crosstalk_scores``.  It is also
+        saved as ``removed_spots_R{N}_minDist_{d}.pkl`` for offline QC.
+
+        Parameters
+        ----------
+        spots_df_mixed : pd.DataFrame
+            All spots entering the unmixer (post-QC geometric filters, pre-spatial dedup).
+            Must have a ``spot_uid_int`` column.
+        unmixed_df : pd.DataFrame
+            Spots that survived unmixing.  Must have a ``spot_uid_int`` column.
+        min_dist : float
+            Minimum distance used for this unmixing pass (used only for file naming).
+
+        Returns
+        -------
+        pd.DataFrame
+            Rows from ``spots_df_mixed`` whose ``spot_uid_int`` is absent in
+            ``unmixed_df``.  An extra boolean column ``removed=True`` is added.
+        """
+        survived_uids = set(unmixed_df['spot_uid_int'].values)
+        removed_mask = ~spots_df_mixed['spot_uid_int'].isin(survived_uids)
+        removed_df = spots_df_mixed[removed_mask].copy()
+        removed_df['removed'] = True
+
+        n_removed = len(removed_df)
+        n_total = len(spots_df_mixed)
+        print(f"  [crosstalk] Removed spots: {n_removed}/{n_total} "
+              f"({100 * n_removed / max(n_total, 1):.1f}%) for min_dist={min_dist}")
+
+        # Save to disk
+        out_path = self.config.OUTPUT_FOLDER / (
+            f'removed_spots_R{self.config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+        )
+        scratch_path = self.config.SCRATCH_FOLDER / (
+            f'removed_spots_R{self.config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        removed_df.to_pickle(out_path)
+        if scratch_path != out_path:
+            scratch_path.parent.mkdir(parents=True, exist_ok=True)
+            removed_df.to_pickle(scratch_path)
+
+        return removed_df
+
+    def compute_crosstalk_scores(
+        self,
+        unmixed_df: pd.DataFrame,
+        stats_df: pd.DataFrame,
+        removed_df: pd.DataFrame,
+        chan_order: List[str] = None,
+        z_threshold: float = None,
+    ) -> pd.DataFrame:
+        """
+        Annotate unmixed spots with spectral crosstalk quality metrics.
+
+        Two complementary spectral metrics are computed:
+
+        ``dye_line_dist_ratio``
+            Already present on spots after ``apply_qc_filters`` (alias of ``dist_r``
+            from ``stats_df``).  Global spectral ambiguity — channel-agnostic,
+            computed *before* assignment: ``d_2nd_closest / d_closest``.
+
+        ``d_assignment_ratio``
+            **New** post-assignment metric.  Uses the assigned channel
+            (``unmixed_chan``) specifically:
+            ``dist_to_assigned_chan / min(dist_to_all_other_chans)``.
+            Values > 1 mean the spot fits another channel's dye line better than
+            its own — a direct indicator of crosstalk.
+
+        ``z_intensity_vs_removed``
+            Robust z-score of the spot's own-channel intensity vs the *removed*
+            population for the same channel.  Positive → brighter than removed
+            (likely real signal); negative → dimmer (suspect).
+
+        ``crosstalk_score``
+            Combined metric:
+            ``d_assignment_ratio × (1 + max(0, −z_intensity_vs_removed))``.
+            Penalises spectrally ambiguous spots that are also *dimmer* than the
+            typical removed spot.
+
+        ``z_vetoed``
+            Boolean.  True when ``z_intensity_vs_removed > z_threshold``; the spot
+            is unconditionally kept (``crosstalk_score`` forced to 0) regardless
+            of spectral purity.
+
+        Parameters
+        ----------
+        unmixed_df : pd.DataFrame
+            Output of the unmixer; must have ``spot_uid_int`` and ``unmixed_chan``.
+        stats_df : pd.DataFrame
+            Output of ``calculate_distances``; must have ``spot_uid_int`` and
+            ``dist_to_chan_{ch}`` columns for every spot channel.
+        removed_df : pd.DataFrame
+            Output of ``build_removed_spots``; used as the reference intensity
+            population.  Must have intensity columns ``chan_{ch}_intensity`` and a
+            ``chan`` column.
+        chan_order : list of str, optional
+            Ordered list of spot channels.  Defaults to
+            ``config.get_round_spot_channels()``.
+        z_threshold : float, optional
+            Brightness veto threshold.  Defaults to
+            ``config.CROSSTALK_Z_THRESHOLD``.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of ``unmixed_df`` with additional columns:
+            ``d_assignment_ratio``, ``z_intensity_vs_removed``,
+            ``crosstalk_score``, ``z_vetoed``.
+            ``dye_line_dist_ratio`` is added/refreshed from ``stats_df`` if not
+            already present.
+        """
+        if chan_order is None:
+            chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
+        if z_threshold is None:
+            z_threshold = self.config.CROSSTALK_Z_THRESHOLD
+
+        # ── Merge stats columns onto unmixed_df via spot_uid_int ─────────────
+        dist_cols = [f'dist_to_chan_{ch}' for ch in chan_order
+                     if f'dist_to_chan_{ch}' in stats_df.columns]
+        merge_cols = ['spot_uid_int', 'dist_r'] + dist_cols
+        # keep only columns that actually exist in stats_df
+        merge_cols = [c for c in merge_cols if c in stats_df.columns]
+
+        out = unmixed_df.copy()
+        out = out.merge(
+            stats_df[merge_cols],
+            on='spot_uid_int',
+            how='left',
+            suffixes=('', '_stats'),
+        )
+
+        # Refresh dye_line_dist_ratio from the freshly merged dist_r
+        if 'dist_r' in out.columns:
+            out['dye_line_dist_ratio'] = out['dist_r']
+
+        # ── d_assignment_ratio (vectorised) ──────────────────────────────────
+        d_ratio = np.full(len(out), np.nan)
+        if dist_cols:
+            chan_labels = [c.replace('dist_to_chan_', '') for c in dist_cols]
+            chan_to_idx = {ch: i for i, ch in enumerate(chan_labels)}
+            d_matrix = out[dist_cols].values.astype(np.float64)  # (n_spots, n_ch)
+            assigned_idx = out['unmixed_chan'].astype(str).map(chan_to_idx)
+            valid = assigned_idx.notna().values
+            row_idx = np.where(valid)[0]
+            col_idx = assigned_idx.dropna().astype(int).values
+            if len(row_idx):
+                d_assigned = d_matrix[row_idx, col_idx]
+                d_others = d_matrix[row_idx].copy()
+                d_others[np.arange(len(row_idx)), col_idx] = np.inf
+                d_min_other = d_others.min(axis=1)
+                d_min_other[d_min_other == 0] = np.nan
+                d_ratio[row_idx] = d_assigned / d_min_other
+        out['d_assignment_ratio'] = d_ratio
+
+        # ── z_intensity_vs_removed (per channel) ─────────────────────────────
+        z_arr = np.full(len(out), np.nan)
+        unmixed_chan_vals = out['unmixed_chan'].astype(str).values
+
+        for ch in chan_order:
+            int_col = f'chan_{ch}_intensity'
+            if int_col not in out.columns or int_col not in removed_df.columns:
+                continue
+            row_idx = np.where(unmixed_chan_vals == ch)[0]
+            if len(row_idx) == 0:
+                continue
+
+            ref_vals = removed_df.loc[
+                removed_df['chan'].astype(str) == ch, int_col
+            ].dropna()
+            if len(ref_vals) < 5:
+                continue
+
+            ref_med = ref_vals.median()
+            ref_mad = (ref_vals - ref_med).abs().median()
+            if ref_mad < 1e-10:
+                ref_mad = ref_vals.std()
+            if ref_mad < 1e-10:
+                continue  # degenerate distribution — skip
+
+            spot_int = out[int_col].values[row_idx].astype(np.float64)
+            z_arr[row_idx] = (spot_int - ref_med) / (ref_mad * 1.4826)
+
+        out['z_intensity_vs_removed'] = z_arr
+
+        # ── crosstalk_score + brightness veto ────────────────────────────────
+        dim_penalty = np.maximum(0.0, -out['z_intensity_vs_removed'].fillna(0).values)
+        score = out['d_assignment_ratio'].values * (1.0 + dim_penalty)
+
+        z_vetoed = out['z_intensity_vs_removed'].values > z_threshold
+        score = np.where(z_vetoed, 0.0, score)
+        out['z_vetoed'] = z_vetoed
+        out['crosstalk_score'] = score
+
+        n_vetoed = int(z_vetoed.sum())
+        if n_vetoed:
+            print(f"  [crosstalk] z_threshold={z_threshold}: "
+                  f"{n_vetoed} spots brightness-vetoed (score → 0)")
+
+        # Summary per channel
+        print(f"\n  {'ch':>5}  {'n':>6}  {'med_d_ratio':>12}  "
+              f"{'med_z':>8}  {'med_score':>10}  {'%>thresh':>8}")
+        for ch in chan_order:
+            sub = out[out['unmixed_chan'].astype(str) == ch]
+            if len(sub) == 0:
+                continue
+            print(f"  {ch:>5}  {len(sub):>6}"
+                  f"  {sub['d_assignment_ratio'].median():>12.3f}"
+                  f"  {sub['z_intensity_vs_removed'].median():>8.2f}"
+                  f"  {sub['crosstalk_score'].median():>10.3f}"
+                  f"  {100*(sub['crosstalk_score'] > self.config.CROSSTALK_SCORE_THRESHOLD).mean():>7.1f}%")
+
+        return out
+
+    def apply_crosstalk_filter(
+        self,
+        unmixed_df_scored: pd.DataFrame,
+        score_threshold: float = None,
+    ) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Mark spots with high crosstalk scores as invalid in the ``valid_spot``
+        column, making it the single comprehensive QC gate for downstream tables.
+
+        A spot is flagged (``valid_spot = False``) when:
+          * ``crosstalk_score > score_threshold``, AND
+          * ``z_vetoed == False``  (brightness-vetoed spots are always kept)
+
+        Parameters
+        ----------
+        unmixed_df_scored : pd.DataFrame
+            Output of ``compute_crosstalk_scores``; must have ``crosstalk_score``,
+            ``z_vetoed``, and ``valid_spot`` columns.
+        score_threshold : float, optional
+            Defaults to ``config.CROSSTALK_SCORE_THRESHOLD``.
+
+        Returns
+        -------
+        filtered_df : pd.DataFrame
+            Copy of input with ``valid_spot`` updated.
+        summary : dict
+            Per-channel and total removal counts.
+        """
+        if score_threshold is None:
+            score_threshold = self.config.CROSSTALK_SCORE_THRESHOLD
+
+        filtered_df = unmixed_df_scored.copy()
+
+        # Ensure valid_spot column exists (may be absent on pairwise-only runs)
+        if 'valid_spot' not in filtered_df.columns:
+            filtered_df['valid_spot'] = True
+
+        crosstalk_fail = (
+            (filtered_df['crosstalk_score'] > score_threshold) &
+            (~filtered_df['z_vetoed'].fillna(False))
+        )
+        # Only flip True → False; never resurrect spots already failed by geometry
+        filtered_df.loc[crosstalk_fail, 'valid_spot'] = False
+
+        n_flagged = int(crosstalk_fail.sum())
+        n_total = len(filtered_df)
+        print(f"  [crosstalk] score_threshold={score_threshold}: "
+              f"flagged {n_flagged}/{n_total} additional spots "
+              f"({100*n_flagged/max(n_total,1):.1f}%)")
+
+        # Build per-channel summary
+        chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
+        summary: Dict = {'total_flagged': n_flagged, 'total_spots': n_total, 'channels': {}}
+        for ch in chan_order:
+            mask_ch = filtered_df['unmixed_chan'].astype(str) == ch
+            n_ch = int(mask_ch.sum())
+            n_ch_flagged = int((crosstalk_fail & mask_ch).sum())
+            summary['channels'][ch] = {'n_spots': n_ch, 'n_flagged': n_ch_flagged}
+
+        return filtered_df, summary
+
     def _save_results(self, unmixed_df: pd.DataFrame, min_dist: float, suffix: str = '') -> None:
         """Save unmixed spots to file"""
         suffix_str = f'_{suffix}' if suffix else ''

@@ -89,6 +89,13 @@ class SpotPipelineConfig:
     
     # Ratio calculation parameters
     ratio_spot_filter_method: str = "95percentile"
+
+    # Crosstalk QC thresholds (applied independently per min_dist after unmixing)
+    # z_intensity_vs_removed: spots brighter than the removed population by this
+    # many robust z-scores are unconditionally kept regardless of spectral score
+    crosstalk_z_threshold: float = 12.0
+    # spots with crosstalk_score > this value have valid_spot set to False
+    crosstalk_score_threshold: float = 1.0
     
     # Visualization parameters
     plot_params: Optional[Dict[str, Any]] = None
@@ -619,17 +626,61 @@ def unmix_and_process_spots(
         unmixing_method=pipeline_config.unmixing_method,
         channel_pairs=pipeline_config.channel_pairs
     )
-    
-    # Extract unmixed dataframe from results (use first min_distance)
-    # Results is a dict: {min_dist: (unmixed_df, channel_stats)}
+
+    # =========================================================================
+    # CROSSTALK QC — run independently for each min_dist
+    # =========================================================================
+    # all_chans_filt_stats was computed on spots_df_filtered and already has
+    # spot_uid_int stamped as a data column, so merges are index-safe.
+    # spots_df_filtered is the "mixed" reference (post-geometric-QC, pre-dedup).
+    # =========================================================================
+    crosstalk_summaries = {}
+    for min_dist, (unmixed_df_md, _channel_stats) in results.items():
+        print(f"\n  [crosstalk] Processing min_dist={min_dist} …")
+
+        # Normalize chan dtypes before any set operations
+        unmixed_df_md = unmixed_df_md.copy()
+        unmixed_df_md['chan'] = unmixed_df_md['chan'].astype(str)
+        unmixed_df_md['unmixed_chan'] = unmixed_df_md['unmixed_chan'].astype(str)
+
+        # 1. Identify spots removed by spatial dedup / reassignment for this dist
+        removed_df = unmixer.build_removed_spots(
+            spots_df_filtered, unmixed_df_md, min_dist
+        )
+
+        # 2. Annotate with d_assignment_ratio, z_intensity_vs_removed, crosstalk_score
+        unmixed_df_md = unmixer.compute_crosstalk_scores(
+            unmixed_df_md,
+            all_chans_filt_stats,
+            removed_df,
+            z_threshold=pipeline_config.crosstalk_z_threshold,
+        )
+
+        # 3. Update valid_spot — now the comprehensive all-QC-passed gate
+        unmixed_df_md, ct_summary = unmixer.apply_crosstalk_filter(
+            unmixed_df_md,
+            score_threshold=pipeline_config.crosstalk_score_threshold,
+        )
+        crosstalk_summaries[min_dist] = ct_summary
+
+        # 4. Re-save unmixed pkl so cell_by_gene_processor reads crosstalk-filtered data
+        unmixed_pkl = (
+            ds_config.SCRATCH_FOLDER
+            / f'unmixed_spots_R{ds_config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+        )
+        unmixed_df_md.to_pickle(unmixed_pkl)
+        print(f"  [crosstalk] Re-saved {unmixed_pkl.name} with updated valid_spot")
+
+        # Propagate the annotated df back into results so callers see it
+        results[min_dist] = (unmixed_df_md, _channel_stats)
+
+    # =========================================================================
+    # Extract canonical (first) min_dist result for downstream steps
+    # =========================================================================
     first_min_dist = pipeline_config.min_distances[0]
     unmixed_df, channel_stats = results[first_min_dist]
-    print(f"Unmixed {len(unmixed_df)} spots with min_distance={first_min_dist}")
-    
-    # Normalize chan/unmixed_chan to str to prevent category vs object comparison bugs
-    unmixed_df['chan'] = unmixed_df['chan'].astype(str)
-    unmixed_df['unmixed_chan'] = unmixed_df['unmixed_chan'].astype(str)
-    
+    print(f"\nUnmixed {len(unmixed_df)} spots with min_distance={first_min_dist}")
+
     # ---- DIAGNOSTIC: Unmixed output ----
     print(f"  [DIAG] unmixed_df: shape={unmixed_df.shape}, "
           f"index range=[{unmixed_df.index.min()}, {unmixed_df.index.max()}]")
@@ -637,37 +688,22 @@ def unmix_and_process_spots(
         print(f"  [DIAG] unmixed_chan unique values: {sorted(unmixed_df['unmixed_chan'].unique())}")
         print(f"  [DIAG] unmixed_chan dtype: {unmixed_df['unmixed_chan'].dtype}")
         print(f"  [DIAG] chan dtype: {unmixed_df['chan'].dtype}")
-        # Check: are chan and unmixed_chan comparable types?
-        if unmixed_df['chan'].dtype != unmixed_df['unmixed_chan'].dtype:
-            print(f"  [DIAG] *** WARNING: dtype mismatch between chan ({unmixed_df['chan'].dtype}) "
-                  f"and unmixed_chan ({unmixed_df['unmixed_chan'].dtype})")
     if 'valid_spot' in unmixed_df.columns:
         print(f"  [DIAG] unmixed_df valid_spot counts: {unmixed_df['valid_spot'].value_counts().to_dict()}")
-    
+    if 'crosstalk_score' in unmixed_df.columns:
+        n_ct_flagged = (unmixed_df['crosstalk_score'] > pipeline_config.crosstalk_score_threshold).sum()
+        print(f"  [DIAG] crosstalk_score > {pipeline_config.crosstalk_score_threshold}: {n_ct_flagged} spots")
+
     # IMPORTANT: Set min_dist in config for cell_by_gene_processor
     ds_config.min_dist = int(first_min_dist)
-    
+
     # ---- DIAGNOSTIC: Verify file paths for cell_by_gene_processor ----
     mixed_pkl_path = ds_config.SCRATCH_FOLDER / f'mixed_spots_R{ds_config.ROUND_N}.pkl'
     unmixed_pkl_path = ds_config.SCRATCH_FOLDER / f'unmixed_spots_R{ds_config.ROUND_N}_minDist_{int(first_min_dist)}.pkl'
     print(f"  [DIAG] cell_by_gene_processor will read:")
     print(f"         Mixed:   {mixed_pkl_path} (exists={mixed_pkl_path.exists()})")
     print(f"         Unmixed: {unmixed_pkl_path} (exists={unmixed_pkl_path.exists()})")
-    
-    # ---- DIAGNOSTIC: Verify saved pickle matches in-memory unmixed_df ----
-    if unmixed_pkl_path.exists():
-        import pickle as _pkl
-        with open(unmixed_pkl_path, 'rb') as _f:
-            unmixed_from_disk = _pkl.load(_f)
-        print(f"  [DIAG] unmixed_df on disk: shape={unmixed_from_disk.shape}")
-        if len(unmixed_from_disk) != len(unmixed_df):
-            print(f"  [DIAG] *** WARNING: Disk unmixed ({len(unmixed_from_disk)}) != "
-                  f"in-memory unmixed ({len(unmixed_df)})")
-        if 'unmixed_chan' in unmixed_from_disk.columns and 'chan' in unmixed_from_disk.columns:
-            n_same = (unmixed_from_disk['chan'] == unmixed_from_disk['unmixed_chan']).sum()
-            n_reassigned = (unmixed_from_disk['chan'] != unmixed_from_disk['unmixed_chan']).sum()
-            print(f"  [DIAG] On-disk unmixed: {n_same} kept original chan, {n_reassigned} reassigned")
-    
+
     # ---- DIAGNOSTIC: Verify gene_dict mapping ----
     gene_dict = ds_config.GENE_DICT
     print(f"  [DIAG] GENE_DICT for round {ds_config.ROUND_N}: {gene_dict.get(str(ds_config.ROUND_N), 'NOT FOUND')}")
@@ -680,8 +716,8 @@ def unmix_and_process_spots(
     unmatched_gene_chans = set(spots_chan_unique) - set(config_chan_keys)
     if unmatched_gene_chans:
         print(f"  [DIAG] *** WARNING: chan values {unmatched_gene_chans} have NO gene mapping in GENE_DICT!")
-    
-    # Generate cell-by-gene tables
+
+    # Generate cell-by-gene tables (reads the re-saved, crosstalk-filtered pkl)
     cbg_processor = cell_by_gene_processor(
         dataset_folder=pipeline_data.ds.rounds[pipeline_data.round_key].name,
         config=ds_config

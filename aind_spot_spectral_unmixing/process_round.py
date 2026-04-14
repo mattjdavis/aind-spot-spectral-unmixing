@@ -27,7 +27,9 @@ class SpotAnalysisPipeline:
         #round_number: int,
         spots_folder: Path = Path('/data/'),
         output_folder: Path = Path('/results/'),
-        min_distances: Optional[List[float]] = None
+        min_distances: Optional[List[float]] = None,
+        crosstalk_z_threshold: float = None,
+        crosstalk_score_threshold: float = None,
     ):
         """
         Initialize the spot analysis pipeline.
@@ -37,6 +39,8 @@ class SpotAnalysisPipeline:
             spots_folder: Path to the folder containing spot data
             output_folder: Path to save results
             min_distances: List of minimum distances to try for unmixing
+            crosstalk_z_threshold: Brightness veto z-score (default from Config)
+            crosstalk_score_threshold: Max allowed crosstalk score (default from Config)
         """
         # Update configuration
         #Config.ROUND_N = round_number
@@ -47,6 +51,18 @@ class SpotAnalysisPipeline:
         
         # Set default min distances if not provided
         self.min_distances = min_distances or [3.0, 4.0, 5.0]
+
+        # Crosstalk QC thresholds — fall back to Config class-level defaults
+        self.crosstalk_z_threshold = (
+            crosstalk_z_threshold
+            if crosstalk_z_threshold is not None
+            else Config.CROSSTALK_Z_THRESHOLD
+        )
+        self.crosstalk_score_threshold = (
+            crosstalk_score_threshold
+            if crosstalk_score_threshold is not None
+            else Config.CROSSTALK_SCORE_THRESHOLD
+        )
         
         # Initialize components
         self.data_loader = SpotDataLoader()
@@ -159,13 +175,47 @@ class SpotAnalysisPipeline:
                 all_chans_filt_stats,
                 self.min_distances
             )
-            
+
+            # 6b. Crosstalk QC — run independently for each min_dist
+            # all_chans_filt_stats has spot_uid_int stamped so merges are index-safe.
+            # spots_df (post-geometric-QC, pre-dedup) is the mixed reference.
+            self.logger.info("Applying crosstalk QC filters...")
+            for min_dist, (unmixed_df_md, _ch_stats) in results.items():
+                unmixed_df_md = unmixed_df_md.copy()
+                unmixed_df_md['chan'] = unmixed_df_md['chan'].astype(str)
+                unmixed_df_md['unmixed_chan'] = unmixed_df_md['unmixed_chan'].astype(str)
+
+                removed_df = self.unmixer.build_removed_spots(
+                    spots_df, unmixed_df_md, min_dist
+                )
+                unmixed_df_md = self.unmixer.compute_crosstalk_scores(
+                    unmixed_df_md,
+                    all_chans_filt_stats,
+                    removed_df,
+                    z_threshold=self.crosstalk_z_threshold,
+                )
+                unmixed_df_md, ct_summary = self.unmixer.apply_crosstalk_filter(
+                    unmixed_df_md,
+                    score_threshold=self.crosstalk_score_threshold,
+                )
+                self.logger.info(
+                    f"min_dist={min_dist}: crosstalk flagged "
+                    f"{ct_summary['total_flagged']}/{ct_summary['total_spots']} spots"
+                )
+
+                # Re-save unmixed pkl so cell_by_gene_processor reads updated valid_spot
+                unmixed_pkl = (
+                    Config.SCRATCH_FOLDER
+                    / f'unmixed_spots_R{Config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+                )
+                unmixed_df_md.to_pickle(unmixed_pkl)
+
+                results[min_dist] = (unmixed_df_md, _ch_stats)
+
             # 7. Save summary statistics
             self._save_summary_statistics(results)
-            
-            
 
-            # 8. Generate cleaned up tables for analysis 
+            # 8. Generate cleaned up tables for analysis
             processor = cell_by_gene_processor()
             unmixed_results, mixed_results = processor.process_pipeline([Config.ROUND_N])
             # Save final results
