@@ -90,13 +90,14 @@ class SpotPipelineConfig:
     # Ratio calculation parameters
     ratio_spot_filter_method: str = "95percentile"
 
-    # Crosstalk QC thresholds (applied independently per min_dist after unmixing)
-    # z_intensity_vs_removed: spots brighter than the removed population by this
-    # many robust z-scores are unconditionally kept regardless of spectral score
+    # Crosstalk QC thresholds
+    # z_intensity_vs_removed > crosstalk_z_threshold → spot is bright enough to be
+    # unconditionally kept (crosstalk_score forced to 0 / z_vetoed = True).
     crosstalk_z_threshold: float = 12.0
-    # spots with crosstalk_score > this value have valid_spot set to False
+    # Spots with crosstalk_score > crosstalk_score_threshold (and not z_vetoed)
+    # have valid_spot set to False.
     crosstalk_score_threshold: float = 1.0
-    
+
     # Visualization parameters
     plot_params: Optional[Dict[str, Any]] = None
     
