@@ -67,12 +67,30 @@ class Config():
     L1 = 0
     LEARNING_RATE = 1e-9
     
-    # QC parameters --- these are getting moved to qc capsule
-    CENT_CUTOFF = 1
-    CORR_CUTOFF = 0.5
-    DIST_CUTOFF = 4
-    # cell by gene table parameters    
-    min_dist = 3
+    # QC parameters (applied in apply_qc_filters; all three must pass for valid_spot=True)
+    # Filtering is annotative only — all rows are kept in spots_df; valid_spot=True rows
+    # are gated out by cell_by_gene_processor.apply_spot_filters() when building CxG tables.
+    #
+    # CENT_CUTOFF: column `dist` — distance (pixels) from the detected spot center to the
+    #   nearest segmentation centroid.  Low = well-centred inside a cell.
+    #   Keep spots where dist < CENT_CUTOFF  (i.e. threshold is an UPPER bound).
+    CENT_CUTOFF = 1.25
+    #
+    # CORR_CUTOFF: column `r` — Pearson correlation of the spot's intensity profile to an
+    #   ideal Gaussian PSF.  High = well-shaped, diffraction-limited spot.
+    #   Keep spots where r > CORR_CUTOFF  (i.e. threshold is a LOWER bound).
+    CORR_CUTOFF = 0.25
+    #
+    # DIST_CUTOFF: column `dist_r` (also exposed as `dye_line_dist_ratio`) —
+    #   global spectral ambiguity ratio: d_2nd_closest_dye_line / d_closest_dye_line.
+    #   High = spot clearly belongs to one channel (large separation between best and
+    #   second-best dye-line fit).  Low = spectrally ambiguous.
+    #   Keep spots where dist_r > DIST_CUTOFF  (i.e. threshold is a LOWER bound).
+    #   NOTE: this is the channel-agnostic pre-assignment metric; see CROSSTALK_SCORE_THRESHOLD
+    #   for the complementary post-assignment metric (d_assignment_ratio).
+    DIST_CUTOFF = 1.0
+    # cell by gene table parameters
+    min_dist = 1.25
     volume_quantiles = (0.08, 0.5, 0.95)
 
     # Crosstalk QC parameters
