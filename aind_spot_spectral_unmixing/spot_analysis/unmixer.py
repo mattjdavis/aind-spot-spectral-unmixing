@@ -14,6 +14,9 @@ class SpotUnmixer:
         # Pairwise unmixing configuration
         self.channel_pairs = channel_pairs if channel_pairs is not None else []
         self.spatial_scale = spatial_scale if spatial_scale is not None else np.array([1.0, 0.24, 0.24])  # (z, y, x) um/pixel
+        # Ellipsoidal NN search radii (µm); set both equal to min_dist for isotropic sphere
+        self.r_xy_um = 0.5   # lateral semi-axis
+        self.r_z_um  = 1.0   # axial semi-axis  (PSF is ~2x wider in z)
     
     def calculate_distances(
         self,
@@ -207,7 +210,9 @@ class SpotUnmixer:
         stats_df: pd.DataFrame,
         min_dist: float,
         unmixing_method: str = 'reassignment',
-        channel_pairs: List[Tuple[str, str]] = None
+        channel_pairs: List[Tuple[str, str]] = None,
+        r_xy_um: float = None,
+        r_z_um: float = None,
     ) -> Tuple[pd.DataFrame, List[Dict[str, int]]]:
         """
         Unmix spots based on calculated statistics
@@ -235,7 +240,11 @@ class SpotUnmixer:
         elif unmixing_method == 'pairwise':
             if channel_pairs is None:
                 channel_pairs = self.channel_pairs
-            return self._unmix_spots_pairwise(spots_df, stats_df, min_dist, channel_pairs)
+            return self._unmix_spots_pairwise(
+                spots_df, stats_df, min_dist, channel_pairs,
+                r_xy_um=r_xy_um if r_xy_um is not None else self.r_xy_um,
+                r_z_um=r_z_um if r_z_um is not None else self.r_z_um,
+            )
         else:
             raise ValueError(f"Unknown unmixing_method: {unmixing_method}. Use 'reassignment' or 'pairwise'")
     
@@ -300,7 +309,9 @@ class SpotUnmixer:
         spots_df: pd.DataFrame,
         stats_df: pd.DataFrame,
         min_dist: float,
-        channel_pairs: List[Tuple[str, str]]
+        channel_pairs: List[Tuple[str, str]],
+        r_xy_um: float = None,
+        r_z_um: float = None,
     ) -> Tuple[pd.DataFrame, List[Dict[str, int]]]:
         """
         Remove crosstalk by comparing spatially overlapping spots between channel pairs
@@ -308,8 +319,11 @@ class SpotUnmixer:
         Args:
             spots_df: Spot locations and detected channels
             stats_df: Distance to each dye line (must align with spots_df index)
-            min_dist: Minimum spatial distance in physical units (um)
+            min_dist: Minimum spatial distance in physical units (um) — used only for
+                      reassignment path; pairwise uses r_xy_um / r_z_um ellipsoid.
             channel_pairs: List of (chanA, chanB) tuples to check for crosstalk
+            r_xy_um: Lateral semi-axis of the ellipsoidal search volume (µm).
+            r_z_um:  Axial semi-axis of the ellipsoidal search volume (µm).
         
         Returns:
             Tuple containing:
@@ -326,6 +340,9 @@ class SpotUnmixer:
         # Track statistics
         pair_stats = []
         
+        _r_xy = r_xy_um if r_xy_um is not None else self.r_xy_um
+        _r_z  = r_z_um  if r_z_um  is not None else self.r_z_um
+
         # Process each channel pair
         for chanA, chanB in channel_pairs:
             print(f"Processing channel pair: {chanA} - {chanB}")
@@ -334,7 +351,8 @@ class SpotUnmixer:
                 stats_df,
                 chanA,
                 chanB,
-                min_dist,
+                _r_xy,
+                _r_z,
                 keep  # Modified in-place
             )
             pair_stats.append(stats)
@@ -345,7 +363,7 @@ class SpotUnmixer:
         filtered_spots = spots_df[keep].copy()
         filtered_spots['unmixed_chan'] = filtered_spots['chan']  # Keep original channel
         
-        self._save_results(filtered_spots, min_dist)
+        self._save_results(filtered_spots, _r_xy)
         
         return filtered_spots, pair_stats
     
@@ -355,17 +373,20 @@ class SpotUnmixer:
         stats_df: pd.DataFrame,
         chanA: str,
         chanB: str,
-        min_dist: float,
+        r_xy_um: float,
+        r_z_um: float,
         keep: np.ndarray
     ) -> Dict[str, int]:
         """
-        Filter crosstalk between a specific channel pair
-        
+        Filter crosstalk between a specific channel pair using an ellipsoidal
+        NN search volume that matches the microscope PSF anisotropy.
+
         Args:
             chanA, chanB: Channel identifiers (e.g., '488', '514')
-            min_dist: Spatial threshold in physical units (um)
+            r_xy_um: Lateral semi-axis of the search ellipsoid (µm)
+            r_z_um:  Axial semi-axis of the search ellipsoid (µm)
             keep: Global boolean mask (modified in-place)
-        
+
         Returns:
             Statistics dict for this pair
         """
@@ -396,16 +417,21 @@ class SpotUnmixer:
                 'kept_B': maskB.sum()
             }
         
-        # Scale positions by anisotropic factor
-        spatial_scale = np.array(self.spatial_scale)  # (z, y, x)
-        posA = spotsA[['z', 'y', 'x']].values * spatial_scale
-        posB = spotsB[['z', 'y', 'x']].values * spatial_scale
-        
-        # Build KD-tree for channel B
+        # Convert pixels -> µm, then normalise to unit-ellipsoid coordinates:
+        #   (z_um/r_z, y_um/r_xy, x_um/r_xy).  A pair is a candidate iff its
+        #   normalised Euclidean distance <= 1.0.
+        spatial_scale = np.array(self.spatial_scale)  # (z, y, x) µm/px
+        ellipsoid_scale = np.array([1.0 / r_z_um, 1.0 / r_xy_um, 1.0 / r_xy_um])  # (z, y, x)
+        norm_scale = spatial_scale * ellipsoid_scale
+
+        posA = spotsA[['z', 'y', 'x']].values * norm_scale
+        posB = spotsB[['z', 'y', 'x']].values * norm_scale
+
+        # Build KD-tree for channel B (unit-ellipsoid space)
         treeB = cKDTree(posB)
-        
-        # Find spatial overlaps: for each spot in A, find neighbors in B
-        pairs = treeB.query_ball_point(posA, min_dist)  # Returns list of lists
+
+        # Find spatial overlaps: threshold = 1.0 in normalised space
+        pairs = treeB.query_ball_point(posA, 1.0)  # Returns list of lists
         
         # Track removals
         removed_A = 0
