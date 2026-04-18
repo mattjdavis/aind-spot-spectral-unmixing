@@ -74,12 +74,12 @@ class Config():
     # CENT_CUTOFF: column `dist` — distance (pixels) from the detected spot center to the
     #   nearest segmentation centroid.  Low = well-centred inside a cell.
     #   Keep spots where dist < CENT_CUTOFF  (i.e. threshold is an UPPER bound).
-    CENT_CUTOFF = 1.25
+    CENT_CUTOFF = 1.5
     #
     # CORR_CUTOFF: column `r` — Pearson correlation of the spot's intensity profile to an
     #   ideal Gaussian PSF.  High = well-shaped, diffraction-limited spot.
     #   Keep spots where r > CORR_CUTOFF  (i.e. threshold is a LOWER bound).
-    CORR_CUTOFF = 0.25
+    CORR_CUTOFF = 0.2
     #
     # DIST_CUTOFF: column `dist_r` (also exposed as `dye_line_dist_ratio`) —
     #   global spectral ambiguity ratio: d_2nd_closest_dye_line / d_closest_dye_line.
@@ -99,6 +99,12 @@ class Config():
     CROSSTALK_Z_THRESHOLD: float = 12.0
     # crosstalk_score threshold — spots with score > this value have valid_spot set False
     CROSSTALK_SCORE_THRESHOLD: float = 1.0
+
+    # Ellipsoidal NN search radii for pairwise unmixing (µm).
+    # r_xy_um: lateral (XY) semi-axis — matched to lateral PSF FWHM / 2
+    # r_z_um:  axial  (Z)  semi-axis — matched to axial  PSF FWHM / 2 (~2–4x larger)
+    R_XY_UM: float = 0.5
+    R_Z_UM:  float = 1.0
 
 
     folder_paths = None

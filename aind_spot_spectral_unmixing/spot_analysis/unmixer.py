@@ -14,9 +14,9 @@ class SpotUnmixer:
         # Pairwise unmixing configuration
         self.channel_pairs = channel_pairs if channel_pairs is not None else []
         self.spatial_scale = spatial_scale if spatial_scale is not None else np.array([1.0, 0.24, 0.24])  # (z, y, x) um/pixel
-        # Ellipsoidal NN search radii (µm); set both equal to min_dist for isotropic sphere
-        self.r_xy_um = 0.5   # lateral semi-axis
-        self.r_z_um  = 1.0   # axial semi-axis  (PSF is ~2x wider in z)
+        # Ellipsoidal NN search radii (µm) — read from config if available, else fall back to defaults
+        self.r_xy_um = getattr(config, 'R_XY_UM', 0.5)   # lateral semi-axis
+        self.r_z_um  = getattr(config, 'R_Z_UM',  1.0)   # axial semi-axis  (PSF is ~2x wider in z)
     
     def calculate_distances(
         self,
