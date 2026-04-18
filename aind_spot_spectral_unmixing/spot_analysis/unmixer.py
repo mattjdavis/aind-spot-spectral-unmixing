@@ -343,6 +343,10 @@ class SpotUnmixer:
         _r_xy = r_xy_um if r_xy_um is not None else self.r_xy_um
         _r_z  = r_z_um  if r_z_um  is not None else self.r_z_um
 
+        print(f"  [pairwise] Ellipsoidal NN search active: "
+              f"r_xy={_r_xy} µm, r_z={_r_z} µm  "
+              f"(axial/lateral ratio = {_r_z/_r_xy:.2f}x)")
+
         # Process each channel pair
         for chanA, chanB in channel_pairs:
             print(f"Processing channel pair: {chanA} - {chanB}")
