@@ -665,6 +665,12 @@ def unmix_and_process_spots(
         )
         crosstalk_summaries[min_dist] = ct_summary
 
+        # 4. Compute per-spot k-th NN distance to each channel (within cell)
+        unmixed_df_md = unmixer.compute_cross_channel_nn_density(
+            unmixed_df_md,
+            k=5,
+        )
+
         # 4. Re-save unmixed pkl so cell_by_gene_processor reads crosstalk-filtered data
         unmixed_pkl = (
             ds_config.SCRATCH_FOLDER

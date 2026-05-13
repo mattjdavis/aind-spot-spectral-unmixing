@@ -821,6 +821,112 @@ class SpotUnmixer:
 
         return filtered_df, summary
 
+    def compute_cross_channel_nn_density(
+        self,
+        unmixed_df: pd.DataFrame,
+        chan_order: "list[str] | None" = None,
+        k: int = 5,
+    ) -> pd.DataFrame:
+        """
+        Compute the k-th nearest-neighbour distance from each spot to same-channel
+        and cross-channel spots within the same cell.
+
+        For each spot and each channel, the distance to the k-th nearest neighbour
+        (in physical space, using ``self.spatial_scale``) among all spots of that
+        channel in the same cell is recorded.  This distance is the standard input
+        to a kNN density estimator:
+
+        .. math::
+
+            \\hat{\\rho} \\propto \\frac{k}{\\frac{4}{3}\\pi\\, r_k^3}
+
+        Spots in cells that have fewer than 2 spots in a given channel receive
+        ``NaN`` for that channel's column (a single-spot cell has no meaningful
+        neighbour).  If fewer than ``k`` spots exist the distance to the
+        available furthest neighbour is used instead.
+
+        Parameters
+        ----------
+        unmixed_df : pd.DataFrame
+            Must have columns ``cell_id``, ``chan``, ``z``, ``y``, ``x``.
+            Typically the output of ``apply_crosstalk_filter``.
+        chan_order : list of str, optional
+            Ordered spot channels.  Defaults to
+            ``config.get_round_spot_channels()``.
+        k : int, default 5
+            Neighbour rank to use as the density proxy.  k=5 gives a good
+            bias/variance tradeoff for typical HCR spot densities (~5-15
+            spots/cell/channel).
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of ``unmixed_df`` with new float32 columns
+            ``nn{k}_dist_{ch}`` for each channel in ``chan_order``.
+        """
+        if chan_order is None:
+            chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
+
+        spatial_scale = np.array(self.spatial_scale, dtype=np.float64)  # (z, y, x) µm/px
+        coord_cols = ['z', 'y', 'x']
+
+        out = unmixed_df.copy()
+        n_spots = len(out)
+
+        # Pre-scale all coordinates once
+        coords_scaled = out[coord_cols].values.astype(np.float64) * spatial_scale  # (n, 3)
+
+        # Normalise chan dtype for matching
+        chan_vals = out['chan'].astype(str).values
+        cell_vals = out['cell_id'].values
+
+        # Build {cell_id: row_indices} lookup once — shared across channels
+        cell_to_rows: Dict = {}
+        for i, cid in enumerate(cell_vals):
+            cell_to_rows.setdefault(cid, []).append(i)
+
+        for ch in chan_order:
+            col_name = f'nn{k}_dist_{ch}'
+            result = np.full(n_spots, np.nan, dtype=np.float32)
+
+            # Rows belonging to this channel
+            ch_mask = chan_vals == ch
+            ch_rows = np.where(ch_mask)[0]
+
+            if len(ch_rows) == 0:
+                out[col_name] = result
+                continue
+
+            ch_cell_vals = cell_vals[ch_rows]
+
+            # Group channel rows by cell
+            cell_to_ch_rows: Dict = {}
+            for row_i, cid in zip(ch_rows, ch_cell_vals):
+                cell_to_ch_rows.setdefault(cid, []).append(row_i)
+
+            for cid, rows_in_cell in cell_to_ch_rows.items():
+                n_cell_ch = len(rows_in_cell)
+                if n_cell_ch < 2:
+                    # Single spot — no meaningful neighbour
+                    continue
+
+                pts = coords_scaled[rows_in_cell]  # (n_cell_ch, 3)
+                # Query k+1 neighbours (first hit is self at dist 0)
+                k_query = min(k + 1, n_cell_ch)
+                tree = cKDTree(pts)
+                dists, _ = tree.query(pts, k=k_query, workers=1)
+                # dists[:, 0] == 0 (self); take the last column as the k-th neighbour
+                # (or the furthest available if n_cell_ch <= k)
+                kth_dists = dists[:, -1].astype(np.float32)
+                for local_i, row_i in enumerate(rows_in_cell):
+                    result[row_i] = kth_dists[local_i]
+
+            out[col_name] = result
+            n_valid = int(np.sum(~np.isnan(result)))
+            print(f"  [nn_density] chan={ch}: {n_valid}/{n_spots} spots have nn{k}_dist")
+
+        return out
+
     def _save_results(self, unmixed_df: pd.DataFrame, min_dist: float, suffix: str = '') -> None:
         """Save unmixed spots to file"""
         suffix_str = f'_{suffix}' if suffix else ''
