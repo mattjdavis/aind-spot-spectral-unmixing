@@ -609,10 +609,19 @@ class SpotUnmixer:
         -------
         pd.DataFrame
             Copy of ``unmixed_df`` with additional columns:
-            ``d_assignment_ratio``, ``z_intensity_vs_removed``,
+            ``d_assignment_ratio``, ``d_assign_neighbor_ratio_1``,
+            ``d_assign_neighbor_ratio_2``, ``z_intensity_vs_removed``,
             ``crosstalk_score``, ``z_vetoed``.
             ``dye_line_dist_ratio`` is added/refreshed from ``stats_df`` if not
             already present.
+
+            ``d_assign_neighbor_ratio_1`` — ratio of ``dist_to_assigned_chan``
+            to the closer of the two spectrally adjacent channels in
+            ``chan_order`` (i.e. ``chan_order[i-1]`` or ``chan_order[i+1]``).
+
+            ``d_assign_neighbor_ratio_2`` — same but for the farther adjacent
+            channel.  ``NaN`` for boundary channels (first or last in
+            ``chan_order``) that have only one neighbor.
         """
         if chan_order is None:
             chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
@@ -656,6 +665,41 @@ class SpotUnmixer:
                 d_min_other[d_min_other == 0] = np.nan
                 d_ratio[row_idx] = d_assigned / d_min_other
         out['d_assignment_ratio'] = d_ratio
+
+        # ── d_assign_neighbor_ratio_1 & _2 (spectrally adjacent channels) ────
+        # For a spot assigned to chan_order[i]:
+        #   neighbor distances = [d_matrix[r, i-1], d_matrix[r, i+1]] (where valid)
+        #   ratio_1 = d_assigned / closer neighbor
+        #   ratio_2 = d_assigned / farther neighbor  (NaN if only one neighbor)
+        d_n1 = np.full(len(out), np.nan)
+        d_n2 = np.full(len(out), np.nan)
+        if dist_cols and len(row_idx):
+            n_ch = len(chan_labels)
+            # Build left/right neighbor distances; mask invalid (boundary) with NaN
+            has_left  = col_idx > 0
+            has_right = col_idx < n_ch - 1
+            left_col  = np.clip(col_idx - 1, 0, n_ch - 1)
+            right_col = np.clip(col_idx + 1, 0, n_ch - 1)
+
+            d_left  = np.where(has_left,  d_matrix[row_idx, left_col],  np.nan)
+            d_right = np.where(has_right, d_matrix[row_idx, right_col], np.nan)
+
+            # Stack and sort so neighbor_1 is always the closer one
+            neighbor_stack = np.stack([d_left, d_right], axis=1)  # (n_valid, 2)
+            neighbor_stack = np.sort(neighbor_stack, axis=1)       # ascending
+
+            n1 = neighbor_stack[:, 0]  # closer neighbor distance
+            n2 = neighbor_stack[:, 1]  # farther neighbor distance
+
+            # Only compute ratio where neighbor exists and is non-zero
+            with np.errstate(invalid='ignore', divide='ignore'):
+                r1 = np.where((~np.isnan(n1)) & (n1 > 0), d_assigned / n1, np.nan)
+                r2 = np.where((~np.isnan(n2)) & (n2 > 0), d_assigned / n2, np.nan)
+
+            d_n1[row_idx] = r1
+            d_n2[row_idx] = r2
+        out['d_assign_neighbor_ratio_1'] = d_n1
+        out['d_assign_neighbor_ratio_2'] = d_n2
 
         # ── z_intensity_vs_removed (per channel) ─────────────────────────────
         z_arr = np.full(len(out), np.nan)
