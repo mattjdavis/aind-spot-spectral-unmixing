@@ -366,9 +366,13 @@ class SpotUnmixer:
         # Apply final filtering
         filtered_spots = spots_df[keep].copy()
         filtered_spots['unmixed_chan'] = filtered_spots['chan']  # Keep original channel
-        
-        self._save_results(filtered_spots, _r_xy)
-        
+
+        # Note: for the pairwise method the spatial search radii (r_xy_um / r_z_um) are
+        # stored in unmixing_config.json — the minDist suffix in the filename is not
+        # meaningful here and is driven purely by the min_distances pipeline config.
+        # We intentionally skip _save_results here; spot_pipeline.py re-saves the fully
+        # annotated (crosstalk-scored + nn5) table under the correct minDist name.
+
         return filtered_spots, pair_stats
     
     def _filter_pairwise_crosstalk(
@@ -546,6 +550,156 @@ class SpotUnmixer:
 
         return removed_df
 
+    def annotate_removed_spots(
+        self,
+        removed_df: pd.DataFrame,
+        stats_df: pd.DataFrame,
+        chan_order: List[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Annotate removed spots with spectral distance ratio metrics.
+
+        Calls ``compute_spectral_distance_ratios`` using ``'chan'`` as the
+        assigned channel (removed spots were never reassigned, so their
+        original detection channel is the right reference).
+
+        Adds ``dye_line_dist_ratio``, ``d_assignment_ratio``,
+        ``d_assign_neighbor_ratio_1``, and ``d_assign_neighbor_ratio_2``.
+
+        Parameters
+        ----------
+        removed_df : pd.DataFrame
+            Output of ``build_removed_spots``.
+        stats_df : pd.DataFrame
+            Output of ``calculate_distances``.
+        chan_order : list of str, optional
+
+        Returns
+        -------
+        pd.DataFrame
+            Annotated copy of ``removed_df``.
+        """
+        return self.compute_spectral_distance_ratios(
+            removed_df, stats_df, chan_col='chan', chan_order=chan_order
+        )
+
+    def compute_spectral_distance_ratios(
+        self,
+        df: pd.DataFrame,
+        stats_df: pd.DataFrame,
+        chan_col: str,
+        chan_order: List[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Compute spectral distance ratio metrics for any spots table.
+
+        Merges ``dist_to_chan_{ch}`` columns from ``stats_df`` onto ``df`` via
+        ``spot_uid_int``, then derives:
+
+        ``dye_line_dist_ratio``
+            Refreshed from ``dist_r`` in ``stats_df`` (pre-assignment global
+            ratio, channel-agnostic).
+
+        ``d_assignment_ratio``
+            ``dist_to_assigned_chan / min(dist_to_all_other_chans)``.
+
+        ``d_assign_neighbor_ratio_1`` / ``d_assign_neighbor_ratio_2``
+            Ratio of assigned-channel distance to the closer / farther
+            spectrally adjacent channel in ``chan_order``.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Spots table; must contain ``spot_uid_int`` and the column named by
+            ``chan_col``.
+        stats_df : pd.DataFrame
+            Output of ``calculate_distances``.
+        chan_col : str
+            Column to use as the "assigned" channel.  Pass ``'unmixed_chan'``
+            for unmixed spots and ``'chan'`` for removed spots.
+        chan_order : list of str, optional
+            Ordered spot channels.  Defaults to
+            ``config.get_round_spot_channels()``.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of ``df`` with ``dye_line_dist_ratio``, ``d_assignment_ratio``,
+            ``d_assign_neighbor_ratio_1``, and ``d_assign_neighbor_ratio_2``
+            added or refreshed.
+        """
+        if chan_order is None:
+            chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
+
+        dist_cols = [f'dist_to_chan_{ch}' for ch in chan_order
+                     if f'dist_to_chan_{ch}' in stats_df.columns]
+        merge_cols = ['spot_uid_int', 'dist_r'] + dist_cols
+        merge_cols = [c for c in merge_cols if c in stats_df.columns]
+
+        out = df.copy()
+        out = out.merge(
+            stats_df[merge_cols],
+            on='spot_uid_int',
+            how='left',
+            suffixes=('', '_stats'),
+        )
+
+        # Refresh dye_line_dist_ratio from the freshly merged dist_r
+        if 'dist_r' in out.columns:
+            out['dye_line_dist_ratio'] = out['dist_r']
+
+        # ── d_assignment_ratio (vectorised) ──────────────────────────────────
+        d_ratio = np.full(len(out), np.nan)
+        row_idx = np.array([], dtype=int)
+        col_idx = np.array([], dtype=int)
+        d_assigned = np.array([], dtype=np.float64)
+        if dist_cols:
+            chan_labels = [c.replace('dist_to_chan_', '') for c in dist_cols]
+            chan_to_idx = {ch: i for i, ch in enumerate(chan_labels)}
+            d_matrix = out[dist_cols].values.astype(np.float64)
+            assigned_idx = out[chan_col].astype(str).map(chan_to_idx)
+            valid = assigned_idx.notna().values
+            row_idx = np.where(valid)[0]
+            col_idx = assigned_idx.dropna().astype(int).values
+            if len(row_idx):
+                d_assigned = d_matrix[row_idx, col_idx]
+                d_others = d_matrix[row_idx].copy()
+                d_others[np.arange(len(row_idx)), col_idx] = np.inf
+                d_min_other = d_others.min(axis=1)
+                d_min_other[d_min_other == 0] = np.nan
+                d_ratio[row_idx] = d_assigned / d_min_other
+        out['d_assignment_ratio'] = d_ratio
+
+        # ── d_assign_neighbor_ratio_1 & _2 (spectrally adjacent channels) ────
+        d_n1 = np.full(len(out), np.nan)
+        d_n2 = np.full(len(out), np.nan)
+        if dist_cols and len(row_idx):
+            n_ch = len(chan_labels)
+            has_left  = col_idx > 0
+            has_right = col_idx < n_ch - 1
+            left_col  = np.clip(col_idx - 1, 0, n_ch - 1)
+            right_col = np.clip(col_idx + 1, 0, n_ch - 1)
+
+            d_left  = np.where(has_left,  d_matrix[row_idx, left_col],  np.nan)
+            d_right = np.where(has_right, d_matrix[row_idx, right_col], np.nan)
+
+            neighbor_stack = np.stack([d_left, d_right], axis=1)
+            neighbor_stack = np.sort(neighbor_stack, axis=1)
+
+            n1 = neighbor_stack[:, 0]
+            n2 = neighbor_stack[:, 1]
+
+            with np.errstate(invalid='ignore', divide='ignore'):
+                r1 = np.where((~np.isnan(n1)) & (n1 > 0), d_assigned / n1, np.nan)
+                r2 = np.where((~np.isnan(n2)) & (n2 > 0), d_assigned / n2, np.nan)
+
+            d_n1[row_idx] = r1
+            d_n2[row_idx] = r2
+        out['d_assign_neighbor_ratio_1'] = d_n1
+        out['d_assign_neighbor_ratio_2'] = d_n2
+
+        return out
+
     def compute_crosstalk_scores(
         self,
         unmixed_df: pd.DataFrame,
@@ -557,19 +711,11 @@ class SpotUnmixer:
         """
         Annotate unmixed spots with spectral crosstalk quality metrics.
 
-        Two complementary spectral metrics are computed:
-
-        ``dye_line_dist_ratio``
-            Already present on spots after ``apply_qc_filters`` (alias of ``dist_r``
-            from ``stats_df``).  Global spectral ambiguity — channel-agnostic,
-            computed *before* assignment: ``d_2nd_closest / d_closest``.
-
-        ``d_assignment_ratio``
-            **New** post-assignment metric.  Uses the assigned channel
-            (``unmixed_chan``) specifically:
-            ``dist_to_assigned_chan / min(dist_to_all_other_chans)``.
-            Values > 1 mean the spot fits another channel's dye line better than
-            its own — a direct indicator of crosstalk.
+        Spectral distance ratios (``dye_line_dist_ratio``, ``d_assignment_ratio``,
+        ``d_assign_neighbor_ratio_1/2``) are delegated to
+        ``compute_spectral_distance_ratios`` using ``unmixed_chan`` as the
+        assigned channel.  The same method can be called with ``chan_col='chan'``
+        to annotate removed spots (see ``annotate_removed_spots``).
 
         ``z_intensity_vs_removed``
             Robust z-score of the spot's own-channel intensity vs the *removed*
@@ -592,8 +738,7 @@ class SpotUnmixer:
         unmixed_df : pd.DataFrame
             Output of the unmixer; must have ``spot_uid_int`` and ``unmixed_chan``.
         stats_df : pd.DataFrame
-            Output of ``calculate_distances``; must have ``spot_uid_int`` and
-            ``dist_to_chan_{ch}`` columns for every spot channel.
+            Output of ``calculate_distances``.
         removed_df : pd.DataFrame
             Output of ``build_removed_spots``; used as the reference intensity
             population.  Must have intensity columns ``chan_{ch}_intensity`` and a
@@ -609,97 +754,19 @@ class SpotUnmixer:
         -------
         pd.DataFrame
             Copy of ``unmixed_df`` with additional columns:
-            ``d_assignment_ratio``, ``d_assign_neighbor_ratio_1``,
-            ``d_assign_neighbor_ratio_2``, ``z_intensity_vs_removed``,
-            ``crosstalk_score``, ``z_vetoed``.
-            ``dye_line_dist_ratio`` is added/refreshed from ``stats_df`` if not
-            already present.
-
-            ``d_assign_neighbor_ratio_1`` — ratio of ``dist_to_assigned_chan``
-            to the closer of the two spectrally adjacent channels in
-            ``chan_order`` (i.e. ``chan_order[i-1]`` or ``chan_order[i+1]``).
-
-            ``d_assign_neighbor_ratio_2`` — same but for the farther adjacent
-            channel.  ``NaN`` for boundary channels (first or last in
-            ``chan_order``) that have only one neighbor.
+            ``dye_line_dist_ratio``, ``d_assignment_ratio``,
+            ``d_assign_neighbor_ratio_1``, ``d_assign_neighbor_ratio_2``,
+            ``z_intensity_vs_removed``, ``crosstalk_score``, ``z_vetoed``.
         """
         if chan_order is None:
             chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
         if z_threshold is None:
             z_threshold = self.config.CROSSTALK_Z_THRESHOLD
 
-        # ── Merge stats columns onto unmixed_df via spot_uid_int ─────────────
-        dist_cols = [f'dist_to_chan_{ch}' for ch in chan_order
-                     if f'dist_to_chan_{ch}' in stats_df.columns]
-        merge_cols = ['spot_uid_int', 'dist_r'] + dist_cols
-        # keep only columns that actually exist in stats_df
-        merge_cols = [c for c in merge_cols if c in stats_df.columns]
-
-        out = unmixed_df.copy()
-        out = out.merge(
-            stats_df[merge_cols],
-            on='spot_uid_int',
-            how='left',
-            suffixes=('', '_stats'),
+        # Compute spectral distance ratios (merge + d_assignment_ratio + neighbor ratios)
+        out = self.compute_spectral_distance_ratios(
+            unmixed_df, stats_df, chan_col='unmixed_chan', chan_order=chan_order
         )
-
-        # Refresh dye_line_dist_ratio from the freshly merged dist_r
-        if 'dist_r' in out.columns:
-            out['dye_line_dist_ratio'] = out['dist_r']
-
-        # ── d_assignment_ratio (vectorised) ──────────────────────────────────
-        d_ratio = np.full(len(out), np.nan)
-        if dist_cols:
-            chan_labels = [c.replace('dist_to_chan_', '') for c in dist_cols]
-            chan_to_idx = {ch: i for i, ch in enumerate(chan_labels)}
-            d_matrix = out[dist_cols].values.astype(np.float64)  # (n_spots, n_ch)
-            assigned_idx = out['unmixed_chan'].astype(str).map(chan_to_idx)
-            valid = assigned_idx.notna().values
-            row_idx = np.where(valid)[0]
-            col_idx = assigned_idx.dropna().astype(int).values
-            if len(row_idx):
-                d_assigned = d_matrix[row_idx, col_idx]
-                d_others = d_matrix[row_idx].copy()
-                d_others[np.arange(len(row_idx)), col_idx] = np.inf
-                d_min_other = d_others.min(axis=1)
-                d_min_other[d_min_other == 0] = np.nan
-                d_ratio[row_idx] = d_assigned / d_min_other
-        out['d_assignment_ratio'] = d_ratio
-
-        # ── d_assign_neighbor_ratio_1 & _2 (spectrally adjacent channels) ────
-        # For a spot assigned to chan_order[i]:
-        #   neighbor distances = [d_matrix[r, i-1], d_matrix[r, i+1]] (where valid)
-        #   ratio_1 = d_assigned / closer neighbor
-        #   ratio_2 = d_assigned / farther neighbor  (NaN if only one neighbor)
-        d_n1 = np.full(len(out), np.nan)
-        d_n2 = np.full(len(out), np.nan)
-        if dist_cols and len(row_idx):
-            n_ch = len(chan_labels)
-            # Build left/right neighbor distances; mask invalid (boundary) with NaN
-            has_left  = col_idx > 0
-            has_right = col_idx < n_ch - 1
-            left_col  = np.clip(col_idx - 1, 0, n_ch - 1)
-            right_col = np.clip(col_idx + 1, 0, n_ch - 1)
-
-            d_left  = np.where(has_left,  d_matrix[row_idx, left_col],  np.nan)
-            d_right = np.where(has_right, d_matrix[row_idx, right_col], np.nan)
-
-            # Stack and sort so neighbor_1 is always the closer one
-            neighbor_stack = np.stack([d_left, d_right], axis=1)  # (n_valid, 2)
-            neighbor_stack = np.sort(neighbor_stack, axis=1)       # ascending
-
-            n1 = neighbor_stack[:, 0]  # closer neighbor distance
-            n2 = neighbor_stack[:, 1]  # farther neighbor distance
-
-            # Only compute ratio where neighbor exists and is non-zero
-            with np.errstate(invalid='ignore', divide='ignore'):
-                r1 = np.where((~np.isnan(n1)) & (n1 > 0), d_assigned / n1, np.nan)
-                r2 = np.where((~np.isnan(n2)) & (n2 > 0), d_assigned / n2, np.nan)
-
-            d_n1[row_idx] = r1
-            d_n2[row_idx] = r2
-        out['d_assign_neighbor_ratio_1'] = d_n1
-        out['d_assign_neighbor_ratio_2'] = d_n2
 
         # ── z_intensity_vs_removed (per channel) ─────────────────────────────
         z_arr = np.full(len(out), np.nan)

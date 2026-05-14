@@ -636,6 +636,14 @@ def unmix_and_process_spots(
     # spot_uid_int stamped as a data column, so merges are index-safe.
     # spots_df_filtered is the "mixed" reference (post-geometric-QC, pre-dedup).
     # =========================================================================
+    # Compute k-NN density once on ALL spots (full population, before unmixing split)
+    # so both unmixed and removed spots share the same full-population density estimate.
+    print("\n  [nn_density] Computing nn5 on full spots_df_filtered (all spots, pre-split) …")
+    _spots_with_nn5 = unmixer.compute_cross_channel_nn_density(spots_df_filtered, k=5)
+    _nn5_cols = [c for c in _spots_with_nn5.columns if c.startswith('nn')]
+    nn5_lookup = _spots_with_nn5[['spot_uid_int'] + _nn5_cols].copy()
+    del _spots_with_nn5
+
     crosstalk_summaries = {}
     for min_dist, (unmixed_df_md, _channel_stats) in results.items():
         print(f"\n  [crosstalk] Processing min_dist={min_dist} …")
@@ -649,6 +657,27 @@ def unmix_and_process_spots(
         removed_df = unmixer.build_removed_spots(
             spots_df_filtered, unmixed_df_md, min_dist
         )
+
+        # Annotate removed spots with spectral distance ratios (d_assignment_ratio, etc.)
+        # Uses chan (original detection channel) as the assigned channel reference.
+        removed_df = unmixer.annotate_removed_spots(removed_df, all_chans_filt_stats)
+
+        # Merge full-population nn5 density into removed spots
+        removed_df = removed_df.merge(nn5_lookup, on='spot_uid_int', how='left')
+
+        # Re-save removed pkl with the new annotations
+        _removed_pkl_scratch = (
+            ds_config.SCRATCH_FOLDER
+            / f'removed_spots_R{ds_config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+        )
+        _removed_pkl_out = (
+            ds_config.OUTPUT_FOLDER
+            / f'removed_spots_R{ds_config.ROUND_N}_minDist_{int(min_dist)}.pkl'
+        )
+        removed_df.to_pickle(_removed_pkl_scratch)
+        if _removed_pkl_out != _removed_pkl_scratch:
+            removed_df.to_pickle(_removed_pkl_out)
+        print(f"  [crosstalk] Re-saved {_removed_pkl_scratch.name} with spectral ratios and nn5")
 
         # 2. Annotate with d_assignment_ratio, z_intensity_vs_removed, crosstalk_score
         unmixed_df_md = unmixer.compute_crosstalk_scores(
@@ -665,13 +694,10 @@ def unmix_and_process_spots(
         )
         crosstalk_summaries[min_dist] = ct_summary
 
-        # 4. Compute per-spot k-th NN distance to each channel (within cell)
-        unmixed_df_md = unmixer.compute_cross_channel_nn_density(
-            unmixed_df_md,
-            k=5,
-        )
+        # 4. Merge full-population nn5 density (computed on all spots before the split)
+        unmixed_df_md = unmixed_df_md.merge(nn5_lookup, on='spot_uid_int', how='left')
 
-        # 4. Re-save unmixed pkl so cell_by_gene_processor reads crosstalk-filtered data
+        # 5. Re-save unmixed pkl so cell_by_gene_processor reads crosstalk-filtered data
         unmixed_pkl = (
             ds_config.SCRATCH_FOLDER
             / f'unmixed_spots_R{ds_config.ROUND_N}_minDist_{int(min_dist)}.pkl'
