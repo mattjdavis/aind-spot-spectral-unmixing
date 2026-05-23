@@ -832,13 +832,29 @@ class SpotUnmixer:
         unmixed_df_scored: pd.DataFrame,
         score_threshold: float = None,
     ) -> Tuple[pd.DataFrame, Dict]:
-        """
-        Mark spots with high crosstalk scores as invalid in the ``valid_spot``
-        column, making it the single comprehensive QC gate for downstream tables.
+        """Alias for apply_spectral_qc — kept for backwards compatibility."""
+        return self.apply_spectral_qc(unmixed_df_scored, score_threshold=score_threshold)
 
-        A spot is flagged (``valid_spot = False``) when:
-          * ``crosstalk_score > score_threshold``, AND
-          * ``z_vetoed == False``  (brightness-vetoed spots are always kept)
+    def apply_spectral_qc(
+        self,
+        unmixed_df_scored: pd.DataFrame,
+        score_threshold: float = None,
+    ) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Stage 2 QC: annotate ``valid_spot`` based on post-assignment spectral metrics.
+
+        Gates applied (each only flips ``True → False``; never resurrects a spot
+        already failed by Stage 1 geometric QC):
+
+        1. **Neighbor ratio filter** (always active when column is present):
+           ``log10(d_assign_neighbor_ratio_1) > NEIGHBOR_RATIO_LOG10_THRESHOLD``
+           → ``valid_spot = False``.
+           Removes spots whose assigned channel is farther away spectrally than
+           its closest adjacent channel.
+
+        2. **Crosstalk score filter** (active only when ``ENABLE_CROSSTALK_SCORE_FILTER=True``):
+           ``crosstalk_score > score_threshold AND not z_vetoed``
+           → ``valid_spot = False``.
 
         Parameters
         ----------
@@ -846,7 +862,7 @@ class SpotUnmixer:
             Output of ``compute_crosstalk_scores``; must have ``crosstalk_score``,
             ``z_vetoed``, and ``valid_spot`` columns.
         score_threshold : float, optional
-            Defaults to ``config.CROSSTALK_SCORE_THRESHOLD``.
+            Crosstalk score threshold. Defaults to ``config.CROSSTALK_SCORE_THRESHOLD``.
 
         Returns
         -------
@@ -855,6 +871,8 @@ class SpotUnmixer:
         summary : dict
             Per-channel and total removal counts.
         """
+        import numpy as _np
+
         if score_threshold is None:
             score_threshold = self.config.CROSSTALK_SCORE_THRESHOLD
 
@@ -864,26 +882,62 @@ class SpotUnmixer:
         if 'valid_spot' not in filtered_df.columns:
             filtered_df['valid_spot'] = True
 
-        crosstalk_fail = (
-            (filtered_df['crosstalk_score'] > score_threshold) &
-            (~filtered_df['z_vetoed'].fillna(False))
-        )
-        # Only flip True → False; never resurrect spots already failed by geometry
-        filtered_df.loc[crosstalk_fail, 'valid_spot'] = False
+        # ── Gate 1: neighbor ratio (log10) ────────────────────────────────────
+        n_neighbor_flagged = 0
+        if 'd_assign_neighbor_ratio_1' in filtered_df.columns:
+            log10_ratio = _np.log10(
+                filtered_df['d_assign_neighbor_ratio_1'].clip(lower=1e-9)
+            )
+            neighbor_fail = (
+                (log10_ratio > self.config.NEIGHBOR_RATIO_LOG10_THRESHOLD) &
+                filtered_df['valid_spot']  # only flip currently-passing spots
+            )
+            filtered_df.loc[neighbor_fail, 'valid_spot'] = False
+            n_neighbor_flagged = int(neighbor_fail.sum())
+            print(f"  [spectral_qc] neighbor_ratio log10 > "
+                  f"{self.config.NEIGHBOR_RATIO_LOG10_THRESHOLD}: "
+                  f"flagged {n_neighbor_flagged}/{len(filtered_df)} spots "
+                  f"({100*n_neighbor_flagged/max(len(filtered_df),1):.1f}%)")
+        else:
+            print("  [spectral_qc] d_assign_neighbor_ratio_1 not found — neighbor ratio gate skipped")
 
-        n_flagged = int(crosstalk_fail.sum())
+        # ── Gate 2: crosstalk score (optional) ───────────────────────────────
+        n_crosstalk_flagged = 0
+        enable_ct = getattr(self.config, 'ENABLE_CROSSTALK_SCORE_FILTER', True)
+        if enable_ct:
+            crosstalk_fail = (
+                (filtered_df['crosstalk_score'] > score_threshold) &
+                (~filtered_df['z_vetoed'].fillna(False))
+            )
+            # Only flip True → False
+            filtered_df.loc[crosstalk_fail, 'valid_spot'] = False
+            n_crosstalk_flagged = int(crosstalk_fail.sum())
+            print(f"  [spectral_qc] crosstalk_score > {score_threshold}: "
+                  f"flagged {n_crosstalk_flagged}/{len(filtered_df)} spots "
+                  f"({100*n_crosstalk_flagged/max(len(filtered_df),1):.1f}%)")
+        else:
+            print(f"  [spectral_qc] crosstalk score filter DISABLED (ENABLE_CROSSTALK_SCORE_FILTER=False)")
+
+        n_total_flagged = n_neighbor_flagged + n_crosstalk_flagged
         n_total = len(filtered_df)
-        print(f"  [crosstalk] score_threshold={score_threshold}: "
-              f"flagged {n_flagged}/{n_total} additional spots "
-              f"({100*n_flagged/max(n_total,1):.1f}%)")
+        print(f"  [spectral_qc] total flagged this stage: {n_total_flagged}/{n_total} "
+              f"({100*n_total_flagged/max(n_total,1):.1f}%)")
 
         # Build per-channel summary
         chan_order = [str(ch) for ch in self.config.get_round_spot_channels()]
-        summary: Dict = {'total_flagged': n_flagged, 'total_spots': n_total, 'channels': {}}
+        summary: Dict = {
+            'total_flagged': n_total_flagged,
+            'total_spots': n_total,
+            'n_neighbor_flagged': n_neighbor_flagged,
+            'n_crosstalk_flagged': n_crosstalk_flagged,
+            'channels': {},
+        }
         for ch in chan_order:
             mask_ch = filtered_df['unmixed_chan'].astype(str) == ch
             n_ch = int(mask_ch.sum())
-            n_ch_flagged = int((crosstalk_fail & mask_ch).sum())
+            n_ch_flagged = int(
+                ((filtered_df['valid_spot'] == False) & mask_ch).sum()
+            )
             summary['channels'][ch] = {'n_spots': n_ch, 'n_flagged': n_ch_flagged}
 
         return filtered_df, summary

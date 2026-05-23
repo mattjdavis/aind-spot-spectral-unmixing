@@ -106,7 +106,19 @@ class SpotProcessor:
         return spots_df, spots_over_thresh
     
     def apply_qc_filters(self, spots_df: pd.DataFrame, stats_df: pd.DataFrame) -> pd.DataFrame:
-        """Apply quality control filters"""
+        """Alias for apply_geometric_qc — kept for backwards compatibility."""
+        return self.apply_geometric_qc(spots_df, stats_df)
+
+    def apply_geometric_qc(self, spots_df: pd.DataFrame, stats_df: pd.DataFrame) -> pd.DataFrame:
+        """Stage 1 QC: annotate valid_spot based on geometric spot-shape metrics.
+
+        Filters applied (all three must pass):
+          - ``dist < CENT_CUTOFF``  — spot is well-centred inside its cell
+          - ``r > CORR_CUTOFF``    — spot profile matches a Gaussian PSF
+          - ``dist_r > DIST_CUTOFF`` — spot is spectrally unambiguous (dye-line ratio)
+
+        All rows are kept; only ``valid_spot`` is annotated.
+        """
 
         spots_df['valid_spot'] = False
         spots_df = spots_df.copy()

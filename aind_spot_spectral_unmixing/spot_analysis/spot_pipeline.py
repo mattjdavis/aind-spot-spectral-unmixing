@@ -97,6 +97,11 @@ class SpotPipelineConfig:
     # Spots with crosstalk_score > crosstalk_score_threshold (and not z_vetoed)
     # have valid_spot set to False.
     crosstalk_score_threshold: float = 1.0
+    # Whether to apply the crosstalk score gate in apply_spectral_qc().
+    # Set False to skip the crosstalk_score filter while still computing all scores.
+    enable_crosstalk_score_filter: bool = True
+    # Stage 2 spectral QC: log10(d_assign_neighbor_ratio_1) > threshold → valid_spot=False.
+    neighbor_ratio_log10_threshold: float = 0.5
 
     # Visualization parameters
     plot_params: Optional[Dict[str, Any]] = None
@@ -422,6 +427,8 @@ def calculate_ratios(
     ds_config.CENT_CUTOFF = pipeline_config.cent_cutoff
     ds_config.CORR_CUTOFF = pipeline_config.corr_cutoff
     ds_config.DIST_CUTOFF = pipeline_config.dist_cutoff
+    ds_config.ENABLE_CROSSTALK_SCORE_FILTER = pipeline_config.enable_crosstalk_score_filter
+    ds_config.NEIGHBOR_RATIO_LOG10_THRESHOLD = pipeline_config.neighbor_ratio_log10_threshold
     
     # Extract intensity array — only for spot channels (not e.g. 405/DAPI / Syto59)
     spot_channels = ds_config.get_round_spot_channels()
@@ -573,9 +580,9 @@ def unmix_and_process_spots(
     assert len(stats_df) == len(spots_df_work), \
         f"BUG: stats_df length ({len(stats_df)}) != spots_df_work length ({len(spots_df_work)})"
     
-    # Apply QC filters
-    spots_df_filtered = processor.apply_qc_filters(spots_df_work, stats_df)
-    print(f"After QC filters: {len(spots_df_filtered)} / {len(spots_df_work)} spots")
+    # Stage 1: geometric QC (dist, r, dist_r)
+    spots_df_filtered = processor.apply_geometric_qc(spots_df_work, stats_df)
+    print(f"After Stage 1 geometric QC: {len(spots_df_filtered)} / {len(spots_df_work)} spots")
     
     # ---- DIAGNOSTIC: QC filter output ----
     # apply_qc_filters calls reset_index(drop=True) internally on BOTH dfs,
@@ -687,8 +694,8 @@ def unmix_and_process_spots(
             z_threshold=pipeline_config.crosstalk_z_threshold,
         )
 
-        # 3. Update valid_spot — now the comprehensive all-QC-passed gate
-        unmixed_df_md, ct_summary = unmixer.apply_crosstalk_filter(
+        # 3. Stage 2: spectral QC (neighbor ratio + optional crosstalk score)
+        unmixed_df_md, ct_summary = unmixer.apply_spectral_qc(
             unmixed_df_md,
             score_threshold=pipeline_config.crosstalk_score_threshold,
         )

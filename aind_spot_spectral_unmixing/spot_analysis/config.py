@@ -99,6 +99,13 @@ class Config():
     CROSSTALK_Z_THRESHOLD: float = 12.0
     # crosstalk_score threshold — spots with score > this value have valid_spot set False
     CROSSTALK_SCORE_THRESHOLD: float = 1.0
+    # Whether to apply the crosstalk score gate in apply_spectral_qc().
+    # Set False to skip the crosstalk_score filter while still computing all scores.
+    ENABLE_CROSSTALK_SCORE_FILTER: bool = True
+    # Stage 2 spectral QC: log10(d_assign_neighbor_ratio_1) > threshold → valid_spot=False.
+    # d_assign_neighbor_ratio_1 = dist_to_assigned_chan / dist_to_closer_spectrally-adjacent_chan.
+    # Values > 0 in log10 space mean the spot is closer to an adjacent channel than its own.
+    NEIGHBOR_RATIO_LOG10_THRESHOLD: float = 0.5
 
     # Ellipsoidal NN search radii for pairwise unmixing (µm).
     # r_xy_um: lateral (XY) semi-axis — matched to lateral PSF FWHM / 2
